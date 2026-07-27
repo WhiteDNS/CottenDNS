@@ -59,6 +59,10 @@ existing launcher contract. The linker flags provide 16 KiB page compatibility.
   and `WD_SCAN`.
 - Generic SOCKS5 UDP, DNS fallback, loss recovery, adaptive duplication, and
   server-advertised fairness remain part of this source tree.
+- Poison-aware question validation, per-resolver transport selection,
+  packet-size-aware narrow-MTU routing, and rotating background path discovery
+  are implemented inside this engine. Android receives the same behavior without
+  a Kotlin port when its pinned CottenDNS SHA is advanced.
 
 Pinning the engine SHA makes debug and release builds use identical engine code
 and prevents stale prebuilt binaries from silently surviving an app merge.

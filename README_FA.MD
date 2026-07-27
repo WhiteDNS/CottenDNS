@@ -17,7 +17,7 @@
 
 <p align="center">
   <a href="README.MD">English</a> ·
-  <a href="https://github.com/TaJirax/CottenDns/releases/latest">آخرین Release</a> ·
+  <a href="https://github.com/WhiteDNS/CottenDns/releases/latest">آخرین Release</a> ·
   <a href="https://t.me/whitedns">کانال تلگرام</a>
 </p>
 
@@ -118,7 +118,7 @@ v.example.com   NS  ns.example.com
 ### 2. نصب سرور
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/TaJirax/CottenDns/main/server_linux_install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh)
 ```
 
 بعد از startup، سرور active encryption key را نمایش می‌دهد و آن را در `encrypt_key.txt` می‌نویسد.
@@ -206,7 +206,7 @@ label کوتاه مهم است. domain کوتاه فضای بیشتری برای
 روی سرور لینوکسی اجرا کنید:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/TaJirax/CottenDns/main/server_linux_install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh)
 ```
 
 installer این کارها را انجام می‌دهد:
@@ -234,9 +234,9 @@ installer این کارها را انجام می‌دهد:
 نمونه‌ها:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/TaJirax/CottenDns/main/server_linux_install.sh) --version vYYYY.MM.DD.HHMMSS-abcdef0
+bash <(curl -Ls https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh) --version vYYYY.MM.DD.HHMMSS-abcdef0
 sudo bash server_linux_install.sh --local
-bash <(curl -Ls https://raw.githubusercontent.com/TaJirax/CottenDns/main/server_linux_install.sh) --uninstall
+bash <(curl -Ls https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh) --uninstall
 ```
 
 دستورهای service:
@@ -275,7 +275,7 @@ flagهای کاربردی سرور:
 archive کلاینت مناسب platform خود را از این صفحه دریافت کنید:
 
 ```text
-https://github.com/TaJirax/CottenDns/releases/latest
+https://github.com/WhiteDNS/CottenDns/releases/latest
 ```
 
 archiveهای کلاینت شامل این موارد هستند:
@@ -752,8 +752,8 @@ go vet ./...
 
 | منبع | لینک |
 | --- | --- |
-| Issues | <https://github.com/TaJirax/CottenDns/issues> |
-| Pull requests | <https://github.com/TaJirax/CottenDns/pulls> |
+| Issues | <https://github.com/WhiteDNS/CottenDns/issues> |
+| Pull requests | <https://github.com/WhiteDNS/CottenDns/pulls> |
 | Telegram | <https://t.me/whitedns> |
 
 ## 📄 مجوز

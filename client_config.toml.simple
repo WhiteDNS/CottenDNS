@@ -154,9 +154,10 @@ LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 RESOLVER_BALANCING_STRATEGY = 3
 
 # How DNS queries reach resolvers:
-#   "auto" (default) - probe over UDP/53 first; if NO resolver passes MTU
-#                      testing, retry the whole fleet over DNS-over-TCP/53.
-#                      Zero cost on UDP-working networks (TCP is never tried).
+#   "auto" (default) - test UDP/53 and TCP/53 per resolver, then keep using the
+#                      fastest healthy path for each resolver independently.
+#                      A slow/failing UDP path can move to TCP without changing
+#                      the rest of the resolver pool.
 #   "udp"            - UDP only (legacy behavior).
 #   "tcp"            - TCP/53 only, for networks that block or truncate UDP/53.
 #   "dot"            - DNS-over-TLS (RFC 7858), normally :853.
@@ -172,6 +173,19 @@ RESOLVER_BALANCING_STRATEGY = 3
 # path instead of losing the tunnel. They require DOT_LISTENER_ENABLED /
 # DOH_LISTENER_ENABLED on the server (both off by default).
 RESOLVER_TRANSPORT = "auto"
+
+# Optional per-resolver transport policy. Unlisted resolvers inherit the global
+# RESOLVER_TRANSPORT above. Keys may be an IP or IP:port. "auto" compares UDP
+# and TCP for that resolver; explicit "udp"/"tcp" stay pinned. "dot"/"doh" are
+# opt-in and retain UDP/TCP survival fallbacks if their encrypted path is blocked.
+# Examples:
+# RESOLVER_TRANSPORT_PATHS = { "1.1.1.1" = "tcp", "8.8.8.8:53" = "auto" }
+RESOLVER_TRANSPORT_PATHS = {}
+
+# Low-rate background path/MTU verification. At most one active resolver is
+# checked at a time, at the current session MTU, so alternate-path health and
+# latency stay fresh without taking bandwidth away from user traffic.
+RESOLVER_TRANSPORT_BACKGROUND_SCAN_INTERVAL_SECONDS = 30.0
 
 # Encrypted-resolver settings (used only by "dot"/"doh").
 # RESOLVER_TLS_SERVER_NAME is the SNI + certificate name presented to the

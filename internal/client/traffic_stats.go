@@ -90,7 +90,7 @@ func (c *Client) runTrafficStatsReporter(ctx context.Context) {
 					formatBytes(currentRX),
 					float64(lossPM)/10.0,
 					activeResolvers,
-					c.activeTransport(),
+					c.resolverTransportSummary(),
 					len(c.txChannel), len(c.encodedTXChannel), len(c.rxChannel),
 					c.rxDroppedPackets.Load(), c.txAdmissionDrops.Load(),
 					c.transportRecoveryCount.Load(),

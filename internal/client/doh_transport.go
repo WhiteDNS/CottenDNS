@@ -24,6 +24,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -147,7 +148,16 @@ func (t *dohQueryTransport) exchange(packet []byte, timeout time.Duration) ([]by
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return dohExchange(ctx, t.httpClient, t.endpoint, packet)
+	response, err := dohExchange(ctx, t.httpClient, t.endpoint, packet)
+	if err != nil {
+		return nil, err
+	}
+	if len(packet) < 2 || len(response) < 2 ||
+		binary.BigEndian.Uint16(packet[:2]) != binary.BigEndian.Uint16(response[:2]) ||
+		(dnsQuestionFingerprint(packet) != 0 && dnsQuestionFingerprint(packet) != dnsQuestionFingerprint(response)) {
+		return nil, errors.New("doh: response does not match query")
+	}
+	return response, nil
 }
 
 func (t *dohQueryTransport) Close() error {
@@ -172,10 +182,8 @@ type dohDataManager struct {
 }
 
 type dohDataJob struct {
-	serverKey string
-	addr      *net.UDPAddr
-	body      []byte
-	now       time.Time
+	frame encodedOutboundDatagram
+	now   time.Time
 }
 
 func newDoHDataManager(c *Client) *dohDataManager {
@@ -217,26 +225,30 @@ func (m *dohDataManager) Stop() {
 // Send queues one already-built DNS query. A bounded worker pool performs the
 // POST and feeds the answer back into rxChannel; control packets have reserved
 // capacity so a bulk burst cannot strand ACKs or session traffic.
-func (m *dohDataManager) Send(serverKey string, addr *net.UDPAddr, packet []byte, priority int, now time.Time) {
-	if m == nil || addr == nil || len(packet) == 0 {
-		return
+func (m *dohDataManager) Send(frame encodedOutboundDatagram, now time.Time) bool {
+	if m == nil || frame.addr == nil || len(frame.packet) == 0 {
+		return false
 	}
 	m.mu.Lock()
 	ctx, dead := m.ctx, m.dead
 	m.mu.Unlock()
 	if dead || ctx == nil || ctx.Err() != nil {
-		return
+		return false
 	}
 
-	job := dohDataJob{serverKey: serverKey, addr: addr, body: append([]byte(nil), packet...), now: now}
+	// Encoded runtime packets are immutable; retaining the frame is sufficient
+	// to keep its backing array alive until the HTTP exchange completes.
+	job := dohDataJob{frame: frame, now: now}
 	queue := m.dataQ
-	if priority <= Enums.PacketPriorityHigh {
+	if frame.priority <= Enums.PacketPriorityHigh {
 		queue = m.controlQ
 	}
 	select {
 	case queue <- job:
+		return true
 	default:
 		m.client.txAdmissionDrops.Add(1)
+		return false
 	}
 }
 
@@ -265,13 +277,18 @@ func (m *dohDataManager) worker(ctx context.Context) {
 }
 
 func (m *dohDataManager) exchangeJob(ctx context.Context, job dohDataJob) {
-	endpoint := m.client.dohEndpoint(job.addr.String())
-	m.client.trackResolverSend(job.body, job.addr.String(), "", job.serverKey, job.now)
-	m.client.txTotalBytes.Add(uint64(len(job.body)))
+	if m.client.resolverReplayCompleted(job.frame, time.Now()) {
+		return
+	}
+	endpoint := m.client.dohEndpoint(job.frame.addr.String())
+	m.client.trackResolverFrameOver(job.frame, "", transportDoH, job.now)
+	m.client.txTotalBytes.Add(uint64(len(job.frame.packet)))
 	reqCtx, cancel := context.WithTimeout(ctx, m.client.resolverRequestTimeout())
 	defer cancel()
-	response, err := dohExchange(reqCtx, m.httpClient, endpoint, job.body)
+	response, err := dohExchange(reqCtx, m.httpClient, endpoint, job.frame.packet)
 	if err != nil || len(response) < 12 || (response[2]&0x80) == 0 {
+		m.client.trackResolverFailureOver(job.frame.packet, job.frame.addr, "", transportDoH, time.Now())
+		m.client.replayRuntimeFrame(job.frame, transportDoH, nil, "", failureReplayMaxDepth)
 		return
 	}
 	buf := m.client.getRuntimeUDPBuffer()
@@ -282,9 +299,9 @@ func (m *dohDataManager) exchangeJob(ctx context.Context, job dohDataJob) {
 	n := copy(buf, response)
 	m.client.rxTotalBytes.Add(uint64(n))
 	select {
-	case m.client.rxChannel <- asyncReadPacket{data: buf[:n], addr: job.addr, localAddr: ""}:
+	case m.client.rxChannel <- asyncReadPacket{data: buf[:n], addr: job.frame.addr, localAddr: "", transport: transportDoH}:
 	default:
 		m.client.putRuntimeUDPBuffer(buf)
-		m.client.onRXDrop(job.addr)
+		m.client.onRXDrop(job.frame.addr)
 	}
 }

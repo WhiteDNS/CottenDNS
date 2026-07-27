@@ -73,7 +73,14 @@ func newDynamicTransportTestServer(t *testing.T) (*Server, []byte) {
 	return s, query
 }
 
-func TestDynamicNativeQueryAcrossStreamTransports(t *testing.T) {
+func TestDynamicNativeQueryAcrossAllTransports(t *testing.T) {
+	t.Run("UDP", func(t *testing.T) {
+		s, query := newDynamicTransportTestServer(t)
+		if response := s.safeHandlePacket(query); len(response) == 0 {
+			t.Fatal("UDP transport-agnostic handler returned no response")
+		}
+	})
+
 	t.Run("TCP", func(t *testing.T) {
 		s, query := newDynamicTransportTestServer(t)
 		client, server := net.Pipe()

@@ -18,7 +18,7 @@
 <p align="center">
   <a href="README_FA.MD">فارسی</a> ·
   <a href="docs/ENGINEERING_CHANGES.md">Engineering Notes</a> ·
-  <a href="https://github.com/TaJirax/CottenDns/releases/latest">Latest Release</a> ·
+  <a href="https://github.com/WhiteDNS/CottenDns/releases/latest">Latest Release</a> ·
   <a href="https://t.me/whitedns">Telegram Channel</a>
 </p>
 
@@ -37,7 +37,8 @@ Recent work focused on staying usable on highly restrictive, lossy networks:
 
 - **DNS-over-TLS and DNS-over-HTTPS.** `RESOLVER_TRANSPORT = dot | doh` encrypts the client→resolver hop, so on networks that fingerprint plaintext DNS on 53 the tunnel looks like a device using an encrypted DNS provider. **A public resolver needs no server change at all** — keep the resolver IPs you already use (`1.1.1.1`, `8.8.8.8`, `9.9.9.9`); the encryption covers exactly the hop that gets fingerprinted, and the resolver still reaches your server through the normal delegation. Strictly opt-in (`auto` never escalates into them) and never a one-way door: if the TLS port is blocked the client falls back to **UDP → TCP/53** by itself. Verify-by-default, with SPKI pinning (`RESOLVER_TLS_PIN`) for a self-signed server. Details: [Engineering Notes §17](docs/ENGINEERING_CHANGES.md).
 - **Optional DoT/DoH server listeners that can share :443.** Only needed to point clients *directly* at this server. They reuse the same transport-agnostic packet handler as UDP/TCP, and TLS material resolves cert/key → ACME → self-signed so an enabled listener always comes up. `DOH_COEXIST_MODE` defaults to **never binding :443**, so a co-hosted panel (3x-ui, Hiddify, …) keeps the port and every inbound it supports — VMess/VLESS/Trojan, xhttp/gRPC/raw/ws/tls, CDN-fronted — keeps working untouched; taking the port is always an explicit choice. Both listeners off by default, and they draw from a capped connection sub-budget so flooding them can never starve the plain TCP/53 survival path.
-- **DNS-over-TCP/53 fallback.** The server serves both UDP/53 and TCP/53 on the same port, and the client (`RESOLVER_TRANSPORT = auto`) probes over UDP first, then transparently re-probes the **whole fleet over TCP/53** if UDP finds no resolvers — surviving networks that filter or truncate UDP/53. Zero cost when UDP works. Every response channel (TXT/CNAME/A/NULL/HTTPS) works over TCP too.
+- **Adaptive per-resolver transport.** The server serves UDP/53 and TCP/53 on the same port. With `RESOLVER_TRANSPORT = auto`, the client measures both paths for every resolver and independently uses the fastest healthy one, so a poisoned or slow UDP resolver can move to TCP without forcing healthy resolvers to follow it. DoT/DoH remain user opt-ins. Every response channel (TXT/CNAME/A/NULL/HTTPS) works across the transport set.
+- **Packet-size-aware joint routing.** Resolver and transport are scored as one path for each packet. A fast low-MTU backup remains in the pool for ACK/control and small fragments instead of being discarded, while large fragments stay on paths whose measured upload MTU can carry them. Background scans can therefore add capacity without lowering the session MTU.
 - **TCP survival-path guardrails.** TCP/53 is treated as a first-class fallback path: per-IP connection caps, optional per-connection query limits, read-idle timeouts, and write deadlines protect the listener while keeping persistent DNS-over-TCP useful.
 - **Paired config presets.** Bundled client/server pairs (`speed`, `survival`, `tcp-survival`) tune both sides together through `CONFIG_PRESET`, while explicit TOML/CLI values still override the profile.
 - **More honest MTU loss reporting.** Loss-aware MTU probing now reports failures against the configured sample budget, so scans can show intermediate loss percentages instead of collapsing early rejects into only `0%` or `100%`.
@@ -133,7 +134,7 @@ v.example.com   NS  ns.example.com
 ### 2. Install Server
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_linux_install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh | sudo bash
 ```
 
 After startup, the server prints the active encryption key and writes it to `encrypt_key.txt`.
@@ -224,7 +225,7 @@ Short labels matter. A shorter domain leaves more room for payload inside the DN
 Run on the remote Linux server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_linux_install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh | sudo bash
 ```
 
 The installer:
@@ -253,11 +254,11 @@ Installer options:
 Examples:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_linux_install.sh | sudo bash
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_linux_install.sh | sudo bash -s -- --version vYYYY.MM.DD.HHMMSS-abcdef0
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_linux_install.sh | sudo bash -s -- --upgrade
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh | sudo bash -s -- --version vYYYY.MM.DD.HHMMSS-abcdef0
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh | sudo bash -s -- --upgrade
 sudo bash server_linux_install.sh --local
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_linux_install.sh | sudo bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_linux_install.sh | sudo bash -s -- --uninstall
 ```
 
 Useful service commands:
@@ -284,14 +285,14 @@ Docker Engine with the Compose plugin can install the server without changing
 host packages. Linux host networking avoids an extra NAT layer on UDP/TCP 53.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_docker_install.sh | sudo sh -s -- --domain vpn.example.com
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_docker_install.sh | sudo sh -s -- --domain vpn.example.com
 ```
 
 Upgrade later with one command. The persistent config and encryption key under
 `/opt/cottendns-docker/data` are retained:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TaJirax/cottenDNS/main/server_docker_install.sh | sudo sh -s -- --upgrade
+curl -fsSL https://raw.githubusercontent.com/WhiteDNS/CottenDns/main/server_docker_install.sh | sudo sh -s -- --upgrade
 ```
 
 The deployed `server_config.toml` ships with these optional knobs (all safe defaults; edit and `systemctl restart cottendns` to apply):
@@ -336,7 +337,7 @@ Every TOML key can be overridden using a lower-case dashed flag generated from t
 Download the client archive for your platform from:
 
 ```text
-https://github.com/TaJirax/CottenDns/releases/latest
+https://github.com/WhiteDNS/CottenDns/releases/latest
 ```
 
 Client release archives include:
@@ -529,15 +530,16 @@ So the worst case is that you end up exactly where you were before.
 | Key (client) | Default | Purpose |
 | --- | --- | --- |
 | `RESOLVER_TRANSPORT` | `auto` | `auto` \| `udp` \| `tcp` \| `dot` \| `doh` |
+| `RESOLVER_TRANSPORT_PATHS` | `{}` | Optional per-resolver overrides, for example `{ "1.1.1.1" = "doh", "8.8.8.8" = "auto" }`. Keys may be resolver IPs, labels, or connection keys. |
+| `RESOLVER_TRANSPORT_BACKGROUND_SCAN_INTERVAL_SECONDS` | `30` | Low-rate interval for remeasuring alternate paths one resolver at a time. |
 | `RESOLVER_TLS_SERVER_NAME` | *(empty)* | SNI/cert name. **Leave empty for public resolvers**; set it only when pointing at your own DoT/DoH server. |
 | `RESOLVER_TLS_PIN` | *(empty)* | Base64 SHA-256 of the server certificate's SubjectPublicKeyInfo. Replaces CA validation — the right way to trust a **self-signed** server. Survives certificate renewal. |
 | `RESOLVER_TLS_INSECURE_SKIP_VERIFY` | `false` | Last resort. The payload stays AEAD-encrypted either way, but an unverified hop can be silently intercepted. |
 | `RESOLVER_DOT_PORT` / `RESOLVER_DOH_PORT` / `RESOLVER_DOH_PATH` | `853` / `443` / `/dns-query` | Where the resolver IP is contacted. |
 
-> **Limits.** The transport and its port/path are **client-wide, not per-resolver**:
-> you cannot run one resolver over DoH while another stays on UDP, and a provider
-> using a different path needs its own profile. Resolver entries are IPs, not
-> hostnames.
+> `auto` never escalates into DoT/DoH. Add an explicit per-resolver override when
+> an encrypted resolver hop is wanted. Port/path and TLS settings remain shared by
+> resolvers using that encrypted transport.
 
 #### Optional: run your own DoT/DoH endpoint
 
@@ -634,7 +636,7 @@ The sample files are the source of truth for defaults and operational comments:
 | 🪪 Tunnel identity/security | `DOMAINS`, `DATA_ENCRYPTION_METHOD`, `ENCRYPTION_KEY`, `QUERY_TYPES`, `DNS_RANDOMIZE_QUERY_ID`, `DNS_EDNS_COOKIE`, `DNS_QNAME_CASE_RANDOMIZATION`, `EDNS_UDP_SIZE`, `RESOLVER_IGNORE_INJECTED_NXDOMAIN` |
 | 🧦 Local proxy | `PROTOCOL_TYPE`, `LISTEN_IP`, `LISTEN_PORT`, `SOCKS5_AUTH`, `SOCKS5_USER`, `SOCKS5_PASS` |
 | 📛 Local DNS | `LOCAL_DNS_ENABLED`, `LOCAL_DNS_IP`, `LOCAL_DNS_PORT`, `LOCAL_DNS_CACHE_MAX_RECORDS`, `LOCAL_DNS_CACHE_TTL_SECONDS`, `LOCAL_DNS_PENDING_TIMEOUT_SECONDS`, `DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS`, `LOCAL_DNS_CACHE_PERSIST_TO_FILE`, `LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS` |
-| 📡 Resolver/loss handling | `RESOLVER_TRANSPORT`, `RESOLVER_BALANCING_STRATEGY`, `RESOLVER_RATE_LIMIT_ENABLED`, `UPLOAD_PACKET_DUPLICATION_COUNT`, `DOWNLOAD_PACKET_DUPLICATION_COUNT`, `UPLOAD_SETUP_PACKET_DUPLICATION_COUNT`, `DOWNLOAD_SETUP_PACKET_DUPLICATION_COUNT`, `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD`, `STREAM_RESOLVER_FAILOVER_COOLDOWN`, `RECHECK_INACTIVE_SERVERS_ENABLED`, `RECHECK_INACTIVE_INTERVAL_SECONDS`, `RECHECK_SERVER_INTERVAL_SECONDS`, `RECHECK_BATCH_SIZE`, `AUTO_DISABLE_TIMEOUT_SERVERS`, `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS`, `AUTO_DISABLE_MIN_OBSERVATIONS`, `AUTO_DISABLE_CHECK_INTERVAL_SECONDS`, `BASE_ENCODE_DATA`, `DUPLICATION_PREFER_DISTINCT_DOMAINS`, `ADAPTIVE_DUPLICATION`, `ADAPTIVE_DUPLICATION_TARGET_DELIVERY` |
+| 📡 Resolver/loss handling | `RESOLVER_TRANSPORT`, `RESOLVER_TRANSPORT_PATHS`, `RESOLVER_TRANSPORT_BACKGROUND_SCAN_INTERVAL_SECONDS`, `RESOLVER_BALANCING_STRATEGY`, `RESOLVER_RATE_LIMIT_ENABLED`, `UPLOAD_PACKET_DUPLICATION_COUNT`, `DOWNLOAD_PACKET_DUPLICATION_COUNT`, `UPLOAD_SETUP_PACKET_DUPLICATION_COUNT`, `DOWNLOAD_SETUP_PACKET_DUPLICATION_COUNT`, `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD`, `STREAM_RESOLVER_FAILOVER_COOLDOWN`, `RECHECK_INACTIVE_SERVERS_ENABLED`, `RECHECK_INACTIVE_INTERVAL_SECONDS`, `RECHECK_SERVER_INTERVAL_SECONDS`, `RECHECK_BATCH_SIZE`, `AUTO_DISABLE_TIMEOUT_SERVERS`, `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS`, `AUTO_DISABLE_MIN_OBSERVATIONS`, `AUTO_DISABLE_CHECK_INTERVAL_SECONDS`, `BASE_ENCODE_DATA`, `DUPLICATION_PREFER_DISTINCT_DOMAINS`, `ADAPTIVE_DUPLICATION`, `ADAPTIVE_DUPLICATION_TARGET_DELIVERY` |
 | 📦 Compression | `UPLOAD_COMPRESSION_TYPE`, `DOWNLOAD_COMPRESSION_TYPE`, `COMPRESSION_MIN_SIZE` |
 | 📏 MTU discovery | `MIN_UPLOAD_MTU`, `MIN_DOWNLOAD_MTU`, `MAX_UPLOAD_MTU`, `MAX_DOWNLOAD_MTU`, `MTU_TEST_RETRIES_RESOLVERS`, `MTU_TEST_TIMEOUT_RESOLVERS`, `MTU_TEST_PARALLELISM_RESOLVERS`, `MTU_TEST_RETRIES_LOGS`, `MTU_TEST_TIMEOUT_LOGS`, `MTU_TEST_PARALLELISM_LOGS`, `MTU_PROBE_SAMPLES`, `MTU_MAX_LOSS`, `MTU_GROUP_GAP_RATIO`, `MTU_ADAPTIVE_GROUPING` |
 | ⚙️ Workers/queues/timers | `RX_TX_WORKERS`, `TUNNEL_PROCESS_WORKERS`, `TUNNEL_PACKET_TIMEOUT_SECONDS`, `DISPATCHER_IDLE_POLL_INTERVAL_SECONDS`, `TX_CHANNEL_SIZE`, `RX_CHANNEL_SIZE`, `RESOLVER_UDP_CONNECTION_POOL_SIZE`, `STREAM_QUEUE_INITIAL_CAPACITY`, `ORPHAN_QUEUE_INITIAL_CAPACITY`, `DNS_RESPONSE_FRAGMENT_STORE_CAPACITY`, `SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS`, `CLIENT_TERMINAL_STREAM_RETENTION_SECONDS`, `CLIENT_CANCELLED_SETUP_RETENTION_SECONDS` |
@@ -852,6 +854,7 @@ Requirements:
 | Go `1.25.0` | Build and test |
 | Git | Version metadata and normal development |
 | Python 3 | Optional local multi-target build helper |
+| GCC or Clang | CGO race-detector tests |
 
 Build current platform:
 
@@ -880,6 +883,17 @@ Targeted tests:
 go test -v -run TestName ./internal/client
 go test -race ./internal/client ./internal/udpserver
 ```
+
+Reproduce the local poison, hijack, all-transport, and 40%/84%-loss environment
+on Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-hostile-network.ps1 -Count 10 -FullRace
+```
+
+The harness creates local hostile UDP/TCP responders, exercises native queries
+over UDP/TCP/DoT/DoH, and performs actual Reed-Solomon reconstruction under
+randomized loss. It does not contact public resolvers or require a live server.
 
 Local multi-target build:
 
@@ -979,8 +993,8 @@ Project links:
 
 | Resource | Link |
 | --- | --- |
-| Issues | <https://github.com/TaJirax/CottenDns/issues> |
-| Pull requests | <https://github.com/TaJirax/CottenDns/pulls> |
+| Issues | <https://github.com/WhiteDNS/CottenDns/issues> |
+| Pull requests | <https://github.com/WhiteDNS/CottenDns/pulls> |
 | Telegram | <https://t.me/whitedns> |
 
 ## 📄 License

@@ -40,11 +40,28 @@ func (c *Client) rcodeIsInjectedNoise(rcode uint8) bool {
 // answer can still be scored as a success (or the sample times out if the
 // resolver is truly unreachable). A throttled warning lets the operator see that
 // DNS poisoning is happening and being absorbed.
-func (c *Client) noteInjectedResolverNoise(addr *net.UDPAddr) {
+func (c *Client) noteInjectedResolverNoise(packet []byte, addr *net.UDPAddr, localAddr string, transport resolverTransport) {
 	if c == nil {
 		return
 	}
 	total := c.injectedNXDOMAINCount.Add(1)
+	if len(packet) >= 2 && addr != nil {
+		fingerprint := dnsQuestionFingerprint(packet)
+		key := resolverSampleKey{
+			resolverAddr:        addr.String(),
+			localAddr:           localAddr,
+			dnsID:               binary.BigEndian.Uint16(packet[:2]),
+			transport:           transport,
+			questionFingerprint: fingerprint,
+		}
+		c.resolverStatsMu.RLock()
+		actualKey, sample, ok := c.resolverSampleLocked(key)
+		c.resolverStatsMu.RUnlock()
+		if ok && (sample.questionFingerprint == 0 || sample.questionFingerprint == fingerprint) {
+			c.noteResolverTransportPoison(sample.serverKey, transport)
+			c.replayPendingResolverSample(actualKey, poisonReplayMaxDepth)
+		}
+	}
 	now := time.Now().UnixNano()
 	last := c.lastInjectionLogUnix.Load()
 	if now-last < injectionLogInterval.Nanoseconds() {
@@ -62,23 +79,95 @@ func (c *Client) noteInjectedResolverNoise(addr *net.UDPAddr) {
 	}
 }
 
+// validateInboundQuestion rejects same-ID responses whose question section does
+// not match the outstanding query. TXID-only matching is insufficient in an
+// actively poisoned network because an injector can observe or guess the ID.
+// The pending sample remains intact so the authentic response can still win.
+func (c *Client) validateInboundQuestion(packet []byte, addr *net.UDPAddr, localAddr string, transport resolverTransport) bool {
+	valid, _ := c.validateInboundQuestionFingerprint(packet, addr, localAddr, transport)
+	return valid
+}
+
+func (c *Client) validateInboundQuestionFingerprint(
+	packet []byte,
+	addr *net.UDPAddr,
+	localAddr string,
+	transport resolverTransport,
+) (bool, uint64) {
+	if c == nil || len(packet) < 2 || addr == nil {
+		return false, 0
+	}
+	fingerprint := dnsQuestionFingerprint(packet)
+	key := resolverSampleKey{
+		resolverAddr:        addr.String(),
+		localAddr:           localAddr,
+		dnsID:               binary.BigEndian.Uint16(packet[:2]),
+		transport:           transport,
+		questionFingerprint: fingerprint,
+	}
+	c.resolverStatsMu.RLock()
+	actualKey, sample, ok := c.resolverSampleLocked(key)
+	c.resolverStatsMu.RUnlock()
+	if !ok || sample.questionFingerprint == 0 {
+		return true, fingerprint
+	}
+	if fingerprint == sample.questionFingerprint {
+		return true, fingerprint
+	}
+
+	total := c.resolverHijackCount.Add(1)
+	c.noteResolverTransportPoison(sample.serverKey, transport)
+	c.replayPendingResolverSample(actualKey, poisonReplayMaxDepth)
+	now := time.Now().UnixNano()
+	last := c.lastHijackLogUnix.Load()
+	if now-last >= injectionLogInterval.Nanoseconds() &&
+		c.lastHijackLogUnix.CompareAndSwap(last, now) &&
+		c.log != nil {
+		c.log.Warnf(
+			"\U0001F6E1 <yellow>Ignored mismatched DNS response (resolver hijack/injection)</yellow> <magenta>|</magenta> <blue>Total</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Resolver</blue>: <cyan>%v</cyan>",
+			total,
+			addr,
+		)
+	}
+	return false, fingerprint
+}
+
 type resolverSampleKey struct {
-	resolverAddr string
-	localAddr    string
-	dnsID        uint16
+	resolverAddr        string
+	localAddr           string
+	dnsID               uint16
+	transport           resolverTransport
+	questionFingerprint uint64
+}
+
+type resolverCompletedKey struct {
+	dnsID               uint16
+	questionFingerprint uint64
 }
 
 type resolverSample struct {
-	serverKey  string
-	sentAt     time.Time
-	timedOut   bool
-	timedOutAt time.Time
-	evictAfter time.Time
+	serverKey           string
+	transport           resolverTransport
+	questionFingerprint uint64
+	sentAt              time.Time
+	timeoutAt           time.Time
+	timedOut            bool
+	timedOutAt          time.Time
+	evictAfter          time.Time
+	packet              []byte
+	packetType          uint8
+	payloadSize         int
+	priority            int
+	replayDepth         uint8
+	replayTriggered     bool
+	mayHaveSibling      bool
 }
 
 type resolverTimeoutObservation struct {
 	serverKey string
+	transport resolverTransport
 	at        time.Time
+	key       resolverSampleKey
 }
 
 func (c *Client) resolverSampleTTL() time.Duration {
@@ -115,15 +204,60 @@ func (c *Client) noteResolverSuccess(serverKey string, rtt time.Duration) {
 }
 
 func (c *Client) trackResolverSend(packet []byte, resolverAddr string, localAddr string, serverKey string, sentAt time.Time) {
+	c.trackResolverSendOver(packet, resolverAddr, localAddr, serverKey, c.activeTransport(), sentAt)
+}
+
+func (c *Client) trackResolverSendOver(packet []byte, resolverAddr string, localAddr string, serverKey string, transport resolverTransport, sentAt time.Time) {
+	c.trackResolverSendMetadata(packet, resolverAddr, localAddr, serverKey, transport, sentAt, 0, 0, 0, 0, false, false)
+}
+
+func (c *Client) trackResolverFrameOver(frame encodedOutboundDatagram, localAddr string, transport resolverTransport, sentAt time.Time) {
+	if frame.addr == nil {
+		return
+	}
+	c.trackResolverSendMetadata(
+		frame.packet,
+		frame.addr.String(),
+		localAddr,
+		frame.serverKey,
+		transport,
+		sentAt,
+		frame.packetType,
+		frame.payloadSize,
+		frame.priority,
+		frame.replayDepth,
+		frame.mayHaveSibling,
+		true,
+	)
+}
+
+func (c *Client) trackResolverSendMetadata(
+	packet []byte,
+	resolverAddr string,
+	localAddr string,
+	serverKey string,
+	transport resolverTransport,
+	sentAt time.Time,
+	packetType uint8,
+	payloadSize int,
+	priority int,
+	replayDepth uint8,
+	mayHaveSibling bool,
+	keepPacket bool,
+) {
 	if c == nil || len(packet) < 2 || resolverAddr == "" || serverKey == "" {
 		return
 	}
 
+	fingerprint := dnsQuestionFingerprint(packet)
 	key := resolverSampleKey{
-		resolverAddr: resolverAddr,
-		localAddr:    localAddr,
-		dnsID:        binary.BigEndian.Uint16(packet[:2]),
+		resolverAddr:        resolverAddr,
+		localAddr:           localAddr,
+		dnsID:               binary.BigEndian.Uint16(packet[:2]),
+		transport:           transport,
+		questionFingerprint: fingerprint,
 	}
+	timeoutAt := sentAt.Add(c.resolverPathRequestTimeout(serverKey, transport))
 
 	var timeoutObservations []resolverTimeoutObservation
 	c.resolverStatsMu.Lock()
@@ -133,45 +267,123 @@ func (c *Client) trackResolverSend(packet []byte, resolverAddr string, localAddr
 			c.evictResolverPendingLocked(overflow + 1)
 		}
 	}
-	c.resolverPending[key] = resolverSample{
-		serverKey: serverKey,
-		sentAt:    sentAt,
+	sample := resolverSample{
+		serverKey:           serverKey,
+		transport:           transport,
+		questionFingerprint: fingerprint,
+		sentAt:              sentAt,
+		timeoutAt:           timeoutAt,
+		packetType:          packetType,
+		payloadSize:         payloadSize,
+		priority:            priority,
+		replayDepth:         replayDepth,
+		mayHaveSibling:      mayHaveSibling,
 	}
+	if keepPacket {
+		// Runtime DNS frames are immutable after encoding. Retaining the slice
+		// keeps its backing array alive for replay without adding one allocation
+		// and full packet copy to every foreground send.
+		sample.packet = packet
+	}
+	c.resolverPending[key] = sample
 	c.resolverStatsMu.Unlock()
 
 	for _, observation := range timeoutObservations {
 		c.noteResolverTimeout(observation.serverKey, observation.at)
+		c.noteResolverTransportFailure(observation.serverKey, observation.transport, observation.at)
+		c.replayPendingResolverSample(observation.key, failureReplayMaxDepth)
 	}
 	c.noteResolverSend(serverKey)
 }
 
-func (c *Client) trackResolverSuccess(packet []byte, addr *net.UDPAddr, localAddr string, receivedAt time.Time) {
+func (c *Client) trackResolverSuccess(packet []byte, addr *net.UDPAddr, localAddr string, receivedAt time.Time) bool {
+	return c.trackResolverSuccessOver(packet, addr, localAddr, c.activeTransport(), receivedAt)
+}
+
+func (c *Client) trackResolverSuccessOver(packet []byte, addr *net.UDPAddr, localAddr string, transport resolverTransport, receivedAt time.Time) bool {
+	return c.trackResolverSuccessOverFingerprint(
+		packet, addr, localAddr, transport, receivedAt, dnsQuestionFingerprint(packet),
+	)
+}
+
+func (c *Client) trackResolverSuccessOverFingerprint(
+	packet []byte,
+	addr *net.UDPAddr,
+	localAddr string,
+	transport resolverTransport,
+	receivedAt time.Time,
+	fingerprint uint64,
+) bool {
 	if c == nil || len(packet) < 2 || addr == nil {
-		return
+		return false
 	}
 
 	key := resolverSampleKey{
-		resolverAddr: addr.String(),
-		localAddr:    localAddr,
-		dnsID:        binary.BigEndian.Uint16(packet[:2]),
+		resolverAddr:        addr.String(),
+		localAddr:           localAddr,
+		dnsID:               binary.BigEndian.Uint16(packet[:2]),
+		transport:           transport,
+		questionFingerprint: fingerprint,
+	}
+	completedKey := resolverCompletedKey{
+		dnsID:               key.dnsID,
+		questionFingerprint: key.questionFingerprint,
 	}
 
 	c.resolverStatsMu.Lock()
-	sample, ok := c.resolverPending[key]
+	if expiresAt, completed := c.resolverCompleted[completedKey]; completed {
+		if expiresAt.After(receivedAt) {
+			c.resolverStatsMu.Unlock()
+			return false
+		}
+		delete(c.resolverCompleted, completedKey)
+	}
+	actualKey, sample, ok := c.resolverSampleLocked(key)
+	if ok && sample.questionFingerprint != 0 && sample.questionFingerprint != fingerprint {
+		ok = false
+	}
 	if ok {
-		delete(c.resolverPending, key)
+		delete(c.resolverPending, actualKey)
+		// A hedge or replay may use another socket, resolver, or transport. Claim
+		// every logically identical query when the first authenticated answer
+		// wins, so a slower copy cannot be dispatched or counted as a timeout.
+		if sample.mayHaveSibling || sample.replayTriggered || sample.replayDepth > 0 {
+			for siblingKey, sibling := range c.resolverPending {
+				sameLogicalQuery := siblingKey.dnsID == key.dnsID &&
+					sample.questionFingerprint != 0 &&
+					sibling.questionFingerprint == sample.questionFingerprint
+				legacySibling := sample.questionFingerprint == 0 &&
+					siblingKey.resolverAddr == key.resolverAddr &&
+					sibling.serverKey == sample.serverKey
+				if sameLogicalQuery || legacySibling {
+					delete(c.resolverPending, siblingKey)
+				}
+			}
+		}
+		if completedKey.questionFingerprint != 0 {
+			if c.resolverCompleted == nil {
+				c.resolverCompleted = make(map[resolverCompletedKey]time.Time)
+			}
+			if len(c.resolverCompleted) >= resolverPendingHardCap {
+				for oldKey := range c.resolverCompleted {
+					delete(c.resolverCompleted, oldKey)
+					break
+				}
+			}
+			c.resolverCompleted[completedKey] = receivedAt.Add(c.resolverSampleTTL())
+		}
 	}
 	c.resolverStatsMu.Unlock()
 
 	if !ok || sample.serverKey == "" {
-		return
+		return false
 	}
 
 	// Credit the carrier only after atomically claiming a real outstanding
 	// sample. handleInboundPacket calls this path only after decoding a tunnel
 	// frame, so empty/NODATA replies and duplicated DNS answers cannot inflate a
 	// carrier's delivery rate.
-	if qType, qTypeOK := DnsParser.FirstQuestionQType(packet); qTypeOK {
+	if qType, qTypeOK := DnsParser.FirstQuestionQType(packet); qTypeOK && c.carrier != nil {
 		c.carrier.recordSuccessForPath(sample.serverKey, qType)
 	}
 
@@ -181,23 +393,71 @@ func (c *Client) trackResolverSuccess(packet []byte, addr *net.UDPAddr, localAdd
 
 	c.recordTunnelResponse(receivedAt)
 	c.noteResolverSuccess(sample.serverKey, receivedAt.Sub(sample.sentAt))
+	c.noteResolverTransportSuccess(sample.serverKey, sample.transport, receivedAt.Sub(sample.sentAt), receivedAt)
+	return true
+}
+
+func (c *Client) resolverReplayCompleted(frame encodedOutboundDatagram, now time.Time) bool {
+	if c == nil || frame.replayDepth == 0 || len(frame.packet) < 2 {
+		return false
+	}
+	key := resolverCompletedKey{
+		dnsID:               binary.BigEndian.Uint16(frame.packet[:2]),
+		questionFingerprint: dnsQuestionFingerprint(frame.packet),
+	}
+	if key.questionFingerprint == 0 {
+		return false
+	}
+	c.resolverStatsMu.Lock()
+	expiresAt, completed := c.resolverCompleted[key]
+	if completed && !expiresAt.After(now) {
+		delete(c.resolverCompleted, key)
+		completed = false
+	}
+	c.resolverStatsMu.Unlock()
+	return completed
 }
 
 func (c *Client) trackResolverFailure(packet []byte, addr *net.UDPAddr, localAddr string, failedAt time.Time) {
+	c.trackResolverFailureOver(packet, addr, localAddr, c.activeTransport(), failedAt)
+}
+
+func (c *Client) trackResolverFailureOver(packet []byte, addr *net.UDPAddr, localAddr string, transport resolverTransport, failedAt time.Time) {
+	c.trackResolverFailureSeverityOver(packet, addr, localAddr, transport, failedAt, false)
+}
+
+func (c *Client) trackResolverHardFailureOver(packet []byte, addr *net.UDPAddr, localAddr string, transport resolverTransport, failedAt time.Time) {
+	c.trackResolverFailureSeverityOver(packet, addr, localAddr, transport, failedAt, true)
+}
+
+func (c *Client) trackResolverFailureSeverityOver(
+	packet []byte,
+	addr *net.UDPAddr,
+	localAddr string,
+	transport resolverTransport,
+	failedAt time.Time,
+	hard bool,
+) {
 	if c == nil || len(packet) < 2 || addr == nil {
 		return
 	}
 
+	fingerprint := dnsQuestionFingerprint(packet)
 	key := resolverSampleKey{
-		resolverAddr: addr.String(),
-		localAddr:    localAddr,
-		dnsID:        binary.BigEndian.Uint16(packet[:2]),
+		resolverAddr:        addr.String(),
+		localAddr:           localAddr,
+		dnsID:               binary.BigEndian.Uint16(packet[:2]),
+		transport:           transport,
+		questionFingerprint: fingerprint,
 	}
 
 	c.resolverStatsMu.Lock()
-	sample, ok := c.resolverPending[key]
+	actualKey, sample, ok := c.resolverSampleLocked(key)
+	if ok && sample.questionFingerprint != 0 && sample.questionFingerprint != fingerprint {
+		ok = false
+	}
 	if ok {
-		delete(c.resolverPending, key)
+		delete(c.resolverPending, actualKey)
 	}
 	c.resolverStatsMu.Unlock()
 
@@ -209,6 +469,78 @@ func (c *Client) trackResolverFailure(packet []byte, addr *net.UDPAddr, localAdd
 	}
 
 	c.recordResolverHealthEvent(sample.serverKey, false, failedAt)
+	if hard {
+		c.noteResolverTransportHardFailure(sample.serverKey, sample.transport, failedAt)
+	} else {
+		c.noteResolverTransportFailure(sample.serverKey, sample.transport, failedAt)
+	}
+}
+
+// resolverSampleLocked returns the exact fingerprinted sample, falling back to
+// a zero-fingerprint entry for legacy/tests that predate question-keyed samples.
+// The caller must hold resolverStatsMu for reading or writing.
+func (c *Client) resolverSampleLocked(key resolverSampleKey) (resolverSampleKey, resolverSample, bool) {
+	if sample, ok := c.resolverPending[key]; ok {
+		return key, sample, true
+	}
+	if key.questionFingerprint != 0 {
+		legacy := key
+		legacy.questionFingerprint = 0
+		if sample, ok := c.resolverPending[legacy]; ok {
+			return legacy, sample, true
+		}
+	}
+	for candidate, sample := range c.resolverPending {
+		if candidate.resolverAddr == key.resolverAddr &&
+			candidate.localAddr == key.localAddr &&
+			candidate.dnsID == key.dnsID &&
+			candidate.transport == key.transport {
+			return candidate, sample, true
+		}
+	}
+	return resolverSampleKey{}, resolverSample{}, false
+}
+
+func dnsQuestionFingerprint(packet []byte) uint64 {
+	if len(packet) < 12 || binary.BigEndian.Uint16(packet[4:6]) != 1 {
+		return 0
+	}
+	const fnvOffset64 = uint64(14695981039346656037)
+	const fnvPrime64 = uint64(1099511628211)
+	hash := fnvOffset64
+	offset := 12
+	for {
+		if offset >= len(packet) {
+			return 0
+		}
+		lengthByte := packet[offset]
+		length := int(lengthByte)
+		offset++
+		hash ^= uint64(lengthByte)
+		hash *= fnvPrime64
+		if length == 0 {
+			break
+		}
+		if length&0xc0 != 0 || length > 63 || offset+length > len(packet) {
+			return 0
+		}
+		for _, labelByte := range packet[offset : offset+length] {
+			if labelByte >= 'A' && labelByte <= 'Z' {
+				labelByte += 'a' - 'A'
+			}
+			hash ^= uint64(labelByte)
+			hash *= fnvPrime64
+		}
+		offset += length
+	}
+	if offset+4 > len(packet) {
+		return 0
+	}
+	for _, b := range packet[offset : offset+4] {
+		hash ^= uint64(b)
+		hash *= fnvPrime64
+	}
+	return hash
 }
 
 func (c *Client) collectExpiredResolverTimeouts(now time.Time) {
@@ -220,6 +552,8 @@ func (c *Client) collectExpiredResolverTimeouts(now time.Time) {
 	c.resolverStatsMu.Unlock()
 	for _, observation := range timeoutObservations {
 		c.noteResolverTimeout(observation.serverKey, observation.at)
+		c.noteResolverTransportFailure(observation.serverKey, observation.transport, observation.at)
+		c.replayPendingResolverSample(observation.key, failureReplayMaxDepth)
 	}
 }
 
@@ -238,6 +572,33 @@ func (c *Client) resolverRequestTimeout() time.Duration {
 		timeout = 500 * time.Millisecond
 	}
 	return timeout
+}
+
+// resolverPathRequestTimeout shortens blackhole detection only after a path has
+// enough successful RTT history. Late replies remain claimable during the
+// existing grace window, so a transient DPI delay can repair the timeout sample
+// instead of permanently disabling a working resolver.
+func (c *Client) resolverPathRequestTimeout(serverKey string, transport resolverTransport) time.Duration {
+	base := c.resolverRequestTimeout()
+	if c == nil || serverKey == "" || !validResolverTransport(transport) {
+		return base
+	}
+	c.resolverTransportMu.Lock()
+	state := c.resolverTransportStateLocked(serverKey)
+	score := pathScoreFor(state, transport)
+	successes, rtt := score.successes, score.rttEWMA
+	c.resolverTransportMu.Unlock()
+	if successes < transportSpeedSampleThreshold || rtt <= 0 {
+		return base
+	}
+	adaptive := 6*rtt + 500*time.Millisecond
+	if adaptive < 1500*time.Millisecond {
+		adaptive = 1500 * time.Millisecond
+	}
+	if adaptive > base {
+		return base
+	}
+	return adaptive
 }
 
 func (c *Client) resolverLateResponseGrace(timeout time.Duration) time.Duration {
@@ -260,16 +621,24 @@ func (c *Client) pruneResolverSamplesLocked(now time.Time) []resolverTimeoutObse
 		return nil
 	}
 
-	timeoutBefore := now.Add(-c.resolverRequestTimeout())
 	absoluteCutoff := now.Add(-c.resolverSampleTTL())
 	requestTimeout := c.resolverRequestTimeout()
 	lateGrace := c.resolverLateResponseGrace(requestTimeout)
 	var timeoutObservations []resolverTimeoutObservation
+	for key, expiresAt := range c.resolverCompleted {
+		if !expiresAt.After(now) {
+			delete(c.resolverCompleted, key)
+		}
+	}
 	for key, sample := range c.resolverPending {
 		if !sample.timedOut {
-			if !sample.sentAt.After(timeoutBefore) {
+			timeoutAt := sample.timeoutAt
+			if timeoutAt.IsZero() {
+				timeoutAt = sample.sentAt.Add(requestTimeout)
+			}
+			if !timeoutAt.After(now) {
 				sample.timedOut = true
-				sample.timedOutAt = sample.sentAt.Add(requestTimeout)
+				sample.timedOutAt = timeoutAt
 				if sample.timedOutAt.After(now) {
 					sample.timedOutAt = now
 				}
@@ -278,7 +647,9 @@ func (c *Client) pruneResolverSamplesLocked(now time.Time) []resolverTimeoutObse
 				if sample.serverKey != "" {
 					timeoutObservations = append(timeoutObservations, resolverTimeoutObservation{
 						serverKey: sample.serverKey,
+						transport: sample.transport,
 						at:        sample.timedOutAt,
+						key:       key,
 					})
 				}
 			}

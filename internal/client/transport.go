@@ -7,10 +7,10 @@
 // transport.go — resolver query transport abstraction. The synchronous query
 // paths (MTU probing, session init, health rechecks) talk to a resolver through
 // a queryExchanger so they work identically over UDP or DNS-over-TCP/53. The
-// active transport is chosen client-wide: RESOLVER_TRANSPORT = udp | tcp | auto,
-// where "auto" tries UDP first and falls back to TCP when a full UDP MTU scan
-// finds zero usable resolvers (see RunInitialMTUTests). The high-throughput data
-// plane has its own persistent TCP path (tcp_data.go).
+// RESOLVER_TRANSPORT supplies the default policy, while optional per-resolver
+// overrides and runtime measurements can select a different path for each
+// resolver. The high-throughput data plane keeps the required stream transports
+// warm so a path change does not restart the tunnel.
 // ==============================================================================
 
 package client
@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cottendns-go/internal/dnsparser"
 )
 
 const tcpQueryDialTimeout = 4 * time.Second
@@ -34,9 +36,9 @@ type queryExchanger interface {
 	Close() error
 }
 
-// resolverTransport is the client-wide active transport for the resolver hop.
-// It is stored as an atomic int32 on the Client so every path (MTU probe,
-// session init, health recheck, data plane) dispatches on one value.
+// resolverTransport identifies one client-to-resolver DNS transport. The
+// Client's atomic value remains the configured/default path for compatibility;
+// adaptive paths are stored independently in resolverTransportState.
 type resolverTransport int32
 
 const (
@@ -90,10 +92,14 @@ func (c *Client) usesStreamTransport() bool {
 	return c.activeTransport() != transportUDP
 }
 
-// newQueryTransport opens a synchronous query transport to resolverLabel using
-// the client's active transport.
+// newQueryTransport opens a synchronous query transport using the compatibility
+// default. New resolver-aware call sites should use newQueryTransportOver.
 func (c *Client) newQueryTransport(resolverLabel string) (queryExchanger, error) {
-	switch c.activeTransport() {
+	return c.newQueryTransportOver(resolverLabel, c.activeTransport())
+}
+
+func (c *Client) newQueryTransportOver(resolverLabel string, transport resolverTransport) (queryExchanger, error) {
+	switch transport {
 	case transportDoH:
 		return c.newDoHQueryTransport(resolverLabel)
 	case transportDoT:
@@ -103,9 +109,13 @@ func (c *Client) newQueryTransport(resolverLabel string) (queryExchanger, error)
 		}
 		// DoT is the TCP/53 wire format inside TLS, so the framing exchanger is
 		// reused verbatim — only the dial differs.
-		return &tcpQueryTransport{conn: conn}, nil
+		return &tcpQueryTransport{client: c, conn: conn}, nil
 	case transportTCP:
-		return newTCPQueryTransport(resolverLabel, tcpQueryDialTimeout)
+		transport, err := newTCPQueryTransport(resolverLabel, tcpQueryDialTimeout)
+		if transport != nil {
+			transport.client = c
+		}
+		return transport, err
 	default:
 		conn, err := dialUDPResolver(resolverLabel)
 		if err != nil {
@@ -151,7 +161,8 @@ func resolverHostWithPort(resolverLabel string, port int) string {
 // reused across the many queries a probe sends, so there is no per-query
 // handshake cost.
 type tcpQueryTransport struct {
-	conn net.Conn
+	client *Client
+	conn   net.Conn
 }
 
 func newTCPQueryTransport(resolverLabel string, dialTimeout time.Duration) (*tcpQueryTransport, error) {
@@ -171,6 +182,7 @@ func (t *tcpQueryTransport) exchange(packet []byte, timeout time.Duration) ([]by
 		return nil, errors.New("malformed dns query")
 	}
 	expectedID := binary.BigEndian.Uint16(packet[:2])
+	expectedQuestion := dnsQuestionFingerprint(packet)
 
 	deadline := time.Now().Add(timeout)
 	_ = t.conn.SetDeadline(deadline)
@@ -186,6 +198,15 @@ func (t *tcpQueryTransport) exchange(packet []byte, timeout time.Duration) ([]by
 			return nil, err
 		}
 		if len(resp) >= 2 && binary.BigEndian.Uint16(resp[:2]) == expectedID {
+			if expectedQuestion != 0 && dnsQuestionFingerprint(resp) != expectedQuestion {
+				continue
+			}
+			if t.client != nil {
+				if parsed, parseErr := dnsparser.ParsePacketLite(resp); parseErr == nil &&
+					t.client.rcodeIsInjectedNoise(parsed.Header.RCode) {
+					continue
+				}
+			}
 			return resp, nil
 		}
 	}

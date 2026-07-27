@@ -389,10 +389,11 @@ length-prefixed, routed through the **exact same** transport-agnostic
 load-shedding, graceful shutdown — so all tunnel logic (sessions, FEC, channels,
 encryption) is shared with UDP, no duplication.
 
-**Client.** Client-wide transport via `RESOLVER_TRANSPORT = auto | udp | tcp`:
-- **`auto` (default)** probes over UDP first; if **zero** resolvers pass MTU
-  testing, it flips to TCP and **re-probes the whole fleet over TCP/53**. On a
-  UDP-working network TCP is never attempted (zero cost).
+**Client.** Resolver-local transport policy via
+`RESOLVER_TRANSPORT = auto | udp | tcp`:
+- **`auto` (default)** measures UDP and TCP/53 for every resolver, then keeps
+  each resolver on its fastest healthy path. A bad UDP path can switch without
+  moving the rest of the fleet.
 - A `queryExchanger` abstraction makes the probe, session-init, and health paths
   transport-agnostic.
 - A persistent **per-resolver TCP connection manager** (`tcp_data.go`) serves the
@@ -666,8 +667,9 @@ doh  ─► UDP ─► TCP/53          tcp  ─► (no fallback)
 auto ─► UDP ─► TCP/53
 ```
 
-The chain is `resolverTransportChain()`; the walk is in `RunInitialMTUTests`,
-which re-probes the whole fleet on each step down.
+The chain is `resolverTransportChain()` and MTU discovery walks it independently
+for each resolver. The background scanner keeps alternate paths measured after
+startup.
 
 ### 17.2 How they are wired into the data path
 
@@ -707,10 +709,9 @@ from the entry plus the transport's own port/path, so `1.1.1.1` becomes
 `https://1.1.1.1:443/dns-query`. Cloudflare, Google and Quad9 publish certificates
 carrying their **IP as a SAN**, so (A) validates with no configuration at all.
 
-*Caveat:* the transport and its port/path are client-wide, not per-resolver. You
-cannot run one resolver over DoH while another stays on UDP, and providers using a
-different path cannot be mixed in one profile. The hedging is sequential
-(fallback), not parallel.
+Per-resolver overrides were added later in §25. The encrypted transport's
+port/path and TLS identity remain shared, but individual resolvers can now select
+`auto`, `udp`, `tcp`, `dot`, or `doh`.
 
 ### 17.4 Certificate trust
 
@@ -1112,6 +1113,94 @@ ARQ remains the eventual-delivery backstop on both directions. No implementation
 can preserve normal throughput when only 16% of packets survive, but the client
 and server now have tested recovery behavior at that operating point rather
 than merely accepting it as a configuration value.
+
+---
+
+## 25. Poison-aware per-resolver transport and path MTU
+
+Transport selection is now resolver-local instead of a whole-client fallback.
+`RESOLVER_TRANSPORT_PATHS` can override the global policy by connection key,
+resolver label, IP:port, or IP. `auto` measures UDP and TCP/53 for each resolver;
+DoT and DoH remain explicit user choices and retain UDP/TCP survival fallbacks.
+
+Initial MTU discovery probes every configured path separately and stores its RTT,
+loss, upload MTU, and download MTU. A bounded background scanner performs full
+MTU discovery on one rotating resolver/transport path at a time at
+`RESOLVER_TRANSPORT_BACKGROUND_SCAN_INTERVAL_SECONDS`, keeping alternate paths
+fresh without creating a scan burst or competing materially with user traffic.
+Selection uses estimated delivered goodput and will move a resolver away from a
+slow, failing, poisoned, or session-MTU-incompatible path. Bulk packets use only
+the best path; sparse high-priority/control traffic may hedge one alternate at a
+bounded interval, so duplication cannot cap bulk throughput.
+
+The runtime scheduler now scores `(resolver, transport)` jointly for the actual
+native packet type and payload size. MTU probe capacity is normalized for each
+packet header before eligibility is checked. A resolver or transport below the
+global session MTU is therefore not dead capacity: it can carry ACKs, controls,
+and any data fragment that fits, while larger fragments remain on wider paths.
+Stream affinity receives a small stability bias, not a hard pin, preventing
+reordering between equivalent paths without trapping a stream on a materially
+slower route. Bulk data never uses an unmeasured transport.
+
+If local UDP transmission, persistent TCP/DoT dialing/writing, or a DoH exchange
+fails, the exact unacknowledged DNS query is replayed immediately on the best
+eligible alternate resolver/transport. Replay preserves the native frame,
+session, and sequence identity, is capped at two path hops, and does not wait for
+the full ARQ RTO. ARQ/NACK remains the correctness backstop after the bounded
+fast replay is exhausted.
+
+Inbound replies are bound to resolver address, local socket, transport, query ID,
+and the complete DNS question. Same-ID replies carrying a different question are
+treated as injection and ignored. When injected NXDOMAIN filtering is enabled,
+the forged answer no longer consumes the outstanding request, allowing a genuine
+answer arriving moments later to win. Poison is evidence that an alternate path
+must be compared, not an automatic penalty against a UDP path that remains the
+fastest working option.
+
+Question fingerprints canonicalize ASCII letter case because DNS names are
+case-insensitive; resolvers that normalize 0x20 casing are accepted without
+weakening QTYPE/QCLASS or name matching. UDP replies carrying `TC=1` are treated
+as explicit hard path failures and move that resolver toward TCP immediately
+instead of spending multiple timeout windows on an answer that cannot fit.
+Poison evidence accelerates a following timeout for two minutes, then expires so
+an old incident cannot make a clean future network overly sensitive.
+
+An unusually fast forged response also acts as a Happy-Eyeballs trigger. The
+still-pending query is raced once on the best alternate path; the original is not
+cancelled, and the first response that passes DNS-question and native tunnel
+authentication atomically claims all replay siblings. Existing control hedges
+count as the alternate, preventing poison from causing duplicate amplification.
+
+Background path exploration is congestion-aware and capacity-budgeted. One
+rotating full MTU refresh is charged per 4096 original foreground frames, a
+conservative approximately 1-2% allowance using a 64-query scan cost model.
+No scan starts when TX, encoded-TX, RX, or pending-query pressure is elevated.
+Completely idle paths receive a stale-state refresh no more often than every two
+minutes (or four configured scan intervals), but even that exception yields to a
+single queued user packet.
+
+The final speed audit ranks replay candidates across the complete eligible
+`(resolver, transport)` set instead of preferring the same resolver by default.
+The common non-duplicated response path no longer scans the complete pending map,
+DNS question fingerprints are parsed once per normal ingress, and immutable
+encoded DNS frames are retained rather than copied into each pending/stream
+queue. Transport-manager publication is protected during runtime teardown.
+Poison/timeout correlation also accepts the timeout deadline being a few
+milliseconds earlier than the adjacent poison event, eliminating an
+event-ordering-dependent missed fast switch found by repeated race testing.
+
+After three successful samples, pending-query blackhole detection uses a
+conservative RTT-derived deadline (`6 × RTT + 500 ms`, with a 1.5-second floor
+and the configured request timeout as its ceiling). Slow/high-jitter paths retain
+the configured timeout. Late genuine replies remain claimable during the
+existing grace period and retract their timeout observation.
+
+The server remains transport-agnostic: UDP, TCP, DoT, and DoH feed the same
+authenticated native packet handler and keep the client's selected settings
+dynamic. The server's Super-FEC band now chooses enough parity for a 90% modeled
+block-recovery target, within Reed-Solomon and configured caps. Randomized loss
+tests exercise actual encoding and reconstruction at 40% and 84% loss; ARQ
+remains the correctness backstop when a block exceeds its parity budget.
 
 ---
 

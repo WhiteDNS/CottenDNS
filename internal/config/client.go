@@ -73,6 +73,17 @@ type ClientConfig struct {
 	// fatal — the client falls back to UDP and then TCP/53 on its own, so a
 	// blocked TLS port degrades to the survival path instead of no tunnel.
 	ResolverTransport string `toml:"RESOLVER_TRANSPORT"`
+	// ResolverTransportPaths optionally pins individual resolvers to a transport
+	// policy. Keys may be a resolver IP, resolver label (IP:port), or connection
+	// key; values are auto|udp|tcp|dot|doh. "auto" compares UDP and TCP for that
+	// resolver. Explicit udp/tcp stay fixed; dot/doh keep their plain survival
+	// fallbacks. Unlisted resolvers inherit ResolverTransport.
+	ResolverTransportPaths map[string]string `toml:"RESOLVER_TRANSPORT_PATHS"`
+	// ResolverTransportBackgroundScanIntervalSec controls the low-rate active
+	// path check. One resolver is checked at a time at the current session MTU;
+	// zero is finalized to 30 seconds. This keeps alternate path RTT/loss fresh
+	// without competing with user traffic.
+	ResolverTransportBackgroundScanIntervalSec float64 `toml:"RESOLVER_TRANSPORT_BACKGROUND_SCAN_INTERVAL_SECONDS"`
 	// Encrypted-resolver settings, used only by the dot/doh transports.
 	// ResolverTLSServerName is the SNI + certificate name presented to the
 	// resolver (leave empty to use the resolver IP itself). ResolverTLSPin is an
@@ -302,26 +313,28 @@ type ClientConfigFlagBinder struct {
 
 func defaultClientConfig() ClientConfig {
 	return ClientConfig{
-		ConfigPreset:                          "default",
-		ProtocolType:                          "SOCKS5",
-		Domains:                               nil,
-		ListenIP:                              "127.0.0.1",
-		ListenPort:                            18000,
-		SOCKS5Auth:                            false,
-		SOCKS5User:                            "master_dns_vpn",
-		SOCKS5Pass:                            "master_dns_vpn",
-		LocalDNSEnabled:                       false,
-		LocalDNSIP:                            "127.0.0.1",
-		LocalDNSPort:                          53,
-		LocalDNSCacheMaxRecords:               10000,
-		LocalDNSCacheTTLSeconds:               14400.0,
-		LocalDNSPendingTimeoutSec:             300.0,
-		LocalDNSCachePersist:                  true,
-		LocalDNSCacheFlushSec:                 60.0,
-		ResolverBalancingStrategy:             3,
-		QNameLabelLength:                      63,
-		ResolverRateLimitEnabled:              true,
-		ResolverTransport:                     "auto",
+		ConfigPreset:              "default",
+		ProtocolType:              "SOCKS5",
+		Domains:                   nil,
+		ListenIP:                  "127.0.0.1",
+		ListenPort:                18000,
+		SOCKS5Auth:                false,
+		SOCKS5User:                "master_dns_vpn",
+		SOCKS5Pass:                "master_dns_vpn",
+		LocalDNSEnabled:           false,
+		LocalDNSIP:                "127.0.0.1",
+		LocalDNSPort:              53,
+		LocalDNSCacheMaxRecords:   10000,
+		LocalDNSCacheTTLSeconds:   14400.0,
+		LocalDNSPendingTimeoutSec: 300.0,
+		LocalDNSCachePersist:      true,
+		LocalDNSCacheFlushSec:     60.0,
+		ResolverBalancingStrategy: 3,
+		QNameLabelLength:          63,
+		ResolverRateLimitEnabled:  true,
+		ResolverTransport:         "auto",
+		ResolverTransportPaths:    map[string]string{},
+		ResolverTransportBackgroundScanIntervalSec: 30.0,
 		ResolverDoTPort:                       853,
 		ResolverDoHPort:                       443,
 		ResolverDoHPath:                       "/dns-query",
@@ -659,6 +672,32 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	default:
 		return cfg, fmt.Errorf("invalid RESOLVER_TRANSPORT: %q (want auto|udp|tcp|dot|doh)", cfg.ResolverTransport)
 	}
+	if cfg.ResolverTransportPaths == nil {
+		cfg.ResolverTransportPaths = map[string]string{}
+	}
+	normalizedTransportPaths := make(map[string]string, len(cfg.ResolverTransportPaths))
+	for rawResolver, rawTransport := range cfg.ResolverTransportPaths {
+		resolver := strings.TrimSpace(rawResolver)
+		if resolver == "" {
+			return cfg, fmt.Errorf("RESOLVER_TRANSPORT_PATHS contains an empty resolver key")
+		}
+		transport := strings.ToLower(strings.TrimSpace(rawTransport))
+		switch transport {
+		case "auto", "udp", "tcp", "dot", "doh":
+		default:
+			return cfg, fmt.Errorf(
+				"invalid RESOLVER_TRANSPORT_PATHS value for %q: %q (want auto|udp|tcp|dot|doh)",
+				resolver, rawTransport,
+			)
+		}
+		normalizedTransportPaths[resolver] = transport
+	}
+	cfg.ResolverTransportPaths = normalizedTransportPaths
+	cfg.ResolverTransportBackgroundScanIntervalSec = clampFloat(
+		defaultFloatAtMostZero(cfg.ResolverTransportBackgroundScanIntervalSec, 30.0),
+		5.0,
+		3600.0,
+	)
 	cfg.ResolverDoTPort = clampInt(defaultIntBelow(cfg.ResolverDoTPort, 1, 853), 1, 65535)
 	cfg.ResolverDoHPort = clampInt(defaultIntBelow(cfg.ResolverDoHPort, 1, 443), 1, 65535)
 	if cfg.ResolverDoHPath == "" || cfg.ResolverDoHPath[0] != '/' {
