@@ -610,10 +610,7 @@ func (s *Stream_server) maybeAdjustAutoFEC() {
 			// code rate tracks how bad the link actually is, lifted above the normal
 			// auto ceiling up to the super cap (0 = Reed-Solomon hard limit). This is
 			// loss-aware, not a flat slam: 76% loss buys less parity than 84%.
-			// At extreme loss, sizing parity only to the expected survivor count
-			// makes reconstruction a coin flip. Super-FEC targets 90% random-loss
-			// block recovery (subject to the configured/hard parity cap).
-			parity := fec.ParityForLossTarget(s.fecAutoBlock, loss, 0.90)
+			parity := fec.ParityForLoss(s.fecAutoBlock, loss)
 			superCap := s.fecSuperMaxParity
 			hardMax := fec.MaxParity(s.fecAutoBlock)
 			if superCap <= 0 || superCap > hardMax {

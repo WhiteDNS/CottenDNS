@@ -80,20 +80,60 @@ type mtuScanCounters struct {
 	rejectDownload atomic.Int32
 }
 
-// RunInitialMTUTests probes every resolver over its configured transport chain.
-// Auto measures UDP and TCP/53 independently; explicit DoT/DoH measures the
-// encrypted path and its plain survival fallbacks. Each resolver keeps the
-// fastest healthy path that can sustain the negotiated session MTU.
+// RunInitialMTUTests tests all connections before the client starts, walking a
+// transport fallback chain until one carries the tunnel:
+//
+//	"udp" / "tcp" — that transport only, no fallback.
+//	"auto"        — UDP, then TCP/53 (a network that blocks or truncates UDP).
+//	"dot" / "doh" — the chosen encrypted transport, then UDP, then TCP/53.
+//
+// The encrypted transports are deliberately *opt-in only*: nothing ever escalates
+// into them, because they exist to disguise the resolver hop, not to rescue a
+// broken one. But choosing one is not a commitment — if the TLS port is blocked
+// (a common censorship response) the client silently degrades to the plain
+// survival transports rather than failing to connect at all.
 func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	if len(c.connections) == 0 {
 		return ErrNoValidConnections
 	}
 
 	chain := resolverTransportChain(c.cfg.ResolverTransport)
-	if len(chain) > 0 {
-		c.setActiveTransport(chain[0])
+	var firstErr error
+	for i, transport := range chain {
+		c.setActiveTransport(transport)
+		if i > 0 {
+			if c.log != nil {
+				c.log.Warnf(
+					"<yellow>No resolvers passed over %s — retrying the whole fleet over %s…</yellow>",
+					chain[i-1], transport,
+				)
+			}
+			for idx := range c.connections {
+				c.prepareConnectionMTUScanState(&c.connections[idx])
+			}
+		}
+
+		err := c.runMTUScan(ctx)
+		if err == nil {
+			if i > 0 && c.log != nil {
+				c.log.Infof("<green>✅ Resolver transport fell back to %s.</green>", transport)
+			}
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		// Only "no usable resolver" is a transport problem worth falling back on;
+		// anything else (cancellation, config) would fail identically elsewhere.
+		if !errors.Is(err, ErrNoValidConnections) {
+			c.setActiveTransport(chain[0])
+			return err
+		}
 	}
-	return c.runMTUScan(ctx)
+
+	// Nothing worked — restore the configured transport so state is predictable.
+	c.setActiveTransport(chain[0])
+	return firstErr
 }
 
 func (c *Client) runMTUScan(ctx context.Context) error {
@@ -720,56 +760,9 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn *Connection, ser
 }
 
 func (c *Client) probeConnectionMTU(ctx context.Context, conn *Connection, maxUploadPayload int) (mtuConnectionProbeResult, mtuRejectReason) {
-	if conn == nil {
-		return mtuConnectionProbeResult{}, mtuRejectUpload
-	}
-	transports := c.resolverTransportCandidates(conn.Key)
-	if len(transports) == 0 {
-		transports = []resolverTransport{c.activeTransport()}
-	}
-
-	var (
-		best       mtuConnectionProbeResult
-		bestReason = mtuRejectUpload
-		bestScore  = -1.0
-	)
-	for _, transport := range transports {
-		result, reason := c.probeConnectionMTUOver(ctx, conn, maxUploadPayload, transport)
-		ok := reason == mtuRejectNone
-		c.noteResolverTransportProbe(conn.Key, transport, result, ok, c.now())
-		if !ok {
-			// Preserve the most advanced rejection for useful diagnostics.
-			if reason == mtuRejectDownload {
-				best, bestReason = result, reason
-			}
-			continue
-		}
-
-		score := float64(max(1, result.DownloadBytes)) * (1 - result.DownloadLoss)
-		rttMillis := float64(result.ResolveTime) / float64(time.Millisecond)
-		if rttMillis < 1 {
-			rttMillis = 1
-		}
-		score /= rttMillis
-		if score > bestScore {
-			best, bestReason, bestScore = result, mtuRejectNone, score
-		}
-	}
-	return best, bestReason
-}
-
-func (c *Client) probeConnectionMTUOver(
-	ctx context.Context,
-	conn *Connection,
-	maxUploadPayload int,
-	transport resolverTransport,
-) (mtuConnectionProbeResult, mtuRejectReason) {
-	if c.probeConnectionMTUOverFn != nil {
-		return c.probeConnectionMTUOverFn(ctx, conn, maxUploadPayload, transport)
-	}
 	var result mtuConnectionProbeResult
 
-	probeTransport, err := c.newQueryTransportOver(conn.ResolverLabel, transport)
+	probeTransport, err := c.newQueryTransport(conn.ResolverLabel)
 	if err != nil {
 		return result, mtuRejectUpload
 	}

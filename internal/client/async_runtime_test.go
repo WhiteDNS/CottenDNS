@@ -11,8 +11,6 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,16 +21,6 @@ import (
 	"cottendns-go/internal/logger"
 	"cottendns-go/internal/security"
 )
-
-type testStreamDataManager struct {
-	stops atomic.Int32
-}
-
-func (*testStreamDataManager) Start(context.Context) {}
-func (m *testStreamDataManager) Stop()               { m.stops.Add(1) }
-func (*testStreamDataManager) Send(encodedOutboundDatagram, time.Time) bool {
-	return true
-}
 
 func createTestClient(t *testing.T) *Client {
 	cfg := config.ClientConfig{
@@ -415,30 +403,5 @@ func TestHandleInboundPacketTreatsServerFailureWithoutTXTAsResolverFailure(t *te
 	}
 	if len(state.Events) != 1 {
 		t.Fatalf("expected one failure health event after SERVFAIL response, got=%d", len(state.Events))
-	}
-}
-
-func TestStreamManagerLookupAndShutdownAreConcurrentSafe(t *testing.T) {
-	manager := &testStreamDataManager{}
-	c := &Client{streamData: map[resolverTransport]streamDataTransport{
-		transportTCP: manager,
-	}}
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 10_000; i++ {
-			if current := c.streamDataManager(transportTCP); current != nil {
-				current.Send(encodedOutboundDatagram{}, time.Now())
-			}
-		}
-	}()
-	c.stopStreamDataManagers()
-	wg.Wait()
-	if got := manager.stops.Load(); got != 1 {
-		t.Fatalf("manager Stop calls=%d, want 1", got)
-	}
-	if got := c.streamDataManager(transportTCP); got != nil {
-		t.Fatal("stopped manager remained published")
 	}
 }

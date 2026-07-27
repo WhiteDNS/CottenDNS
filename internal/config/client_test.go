@@ -91,36 +91,6 @@ func TestAndroidEmbeddingDefaultsAndLimits(t *testing.T) {
 	}
 }
 
-func TestLoadClientConfigPerResolverTransportPaths(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "client_config.toml")
-	if err := os.WriteFile(configPath, []byte(`
-PROTOCOL_TYPE = "socks5"
-DOMAINS = ["v.domain.com"]
-ENCRYPTION_KEY = "secret"
-RESOLVER_TRANSPORT = "auto"
-RESOLVER_TRANSPORT_PATHS = { "1.1.1.1" = "TCP", "8.8.8.8:53" = "doh" }
-RESOLVER_TRANSPORT_BACKGROUND_SCAN_INTERVAL_SECONDS = 2
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "client_resolvers.txt"), []byte("1.1.1.1\n8.8.8.8\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := LoadClientConfig(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.ResolverTransportPaths["1.1.1.1"] != "tcp" ||
-		cfg.ResolverTransportPaths["8.8.8.8:53"] != "doh" {
-		t.Fatalf("unexpected normalized transport paths: %#v", cfg.ResolverTransportPaths)
-	}
-	if cfg.ResolverTransportBackgroundScanIntervalSec != 5 {
-		t.Fatalf("background interval=%v, want clamped 5", cfg.ResolverTransportBackgroundScanIntervalSec)
-	}
-}
-
 func TestLoadClientConfigRejectsInvalidProtocol(t *testing.T) {
 	dir := t.TempDir()
 

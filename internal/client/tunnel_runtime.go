@@ -88,7 +88,6 @@ func (c *Client) exchangeUDPQueryWithConn(conn *net.UDPConn, packet []byte, time
 		return nil, errors.New("malformed dns query")
 	}
 	expectedID := binary.BigEndian.Uint16(packet[:2])
-	expectedQuestion := dnsQuestionFingerprint(packet)
 
 	buffer := c.getRuntimeUDPBuffer()
 	defer c.putRuntimeUDPBuffer(buffer)
@@ -122,24 +121,9 @@ func (c *Client) exchangeUDPQueryWithConn(conn *net.UDPConn, packet []byte, time
 		}
 
 		if n >= 2 && binary.BigEndian.Uint16(buffer[:2]) == expectedID {
-			response := buffer[:n]
-			if expectedQuestion != 0 && dnsQuestionFingerprint(response) != expectedQuestion {
-				mismatchedResponses++
-				if mismatchedResponses >= runtimeUDPMaxMismatchedResponses {
-					return nil, errors.New("too many mismatched dns responses on shared udp socket")
-				}
-				continue
-			}
-			if parsed, parseErr := dnsparser.ParsePacketLite(response); parseErr == nil &&
-				c.rcodeIsInjectedNoise(parsed.Header.RCode) {
-				// A forged NXDOMAIN may race the genuine authoritative answer.
-				// Keep reading on the same query deadline instead of letting the
-				// injected packet fail MTU/session/background probes.
-				continue
-			}
 			// Copy matched response out so the pooled buffer can be recycled.
 			result := make([]byte, n)
-			copy(result, response)
+			copy(result, buffer[:n])
 			return result, nil
 		}
 
@@ -151,13 +135,12 @@ func (c *Client) exchangeUDPQueryWithConn(conn *net.UDPConn, packet []byte, time
 }
 
 func (c *Client) sendOneWayDNSQuery(resolver Connection, packet []byte, deadline time.Time) error {
-	transportKind := c.preferredResolverTransport(resolver.Key)
-	if transportKind != transportUDP {
-		// Best-effort one-shot over the resolver's selected stream transport
-		// (e.g. the session-close burst). DoH has no one-way form, so it reuses
-		// the request/response exchanger and discards the answer.
-		if transportKind == transportDoH {
-			transport, err := c.newQueryTransportOver(resolver.ResolverLabel, transportDoH)
+	if c.usesStreamTransport() {
+		// Best-effort one-shot over the active stream transport (e.g. the
+		// session-close burst). DoH has no one-way form, so it reuses the normal
+		// request/response exchanger and discards the answer.
+		if c.activeTransport() == transportDoH {
+			transport, err := c.newDoHQueryTransport(resolver.ResolverLabel)
 			if err != nil {
 				return err
 			}
@@ -170,7 +153,7 @@ func (c *Client) sendOneWayDNSQuery(resolver Connection, packet []byte, deadline
 			conn net.Conn
 			err  error
 		)
-		if transportKind == transportDoT {
+		if c.activeTransport() == transportDoT {
 			conn, err = c.dialDoTResolver(resolver.ResolverLabel, time.Until(deadline))
 		} else {
 			d := net.Dialer{Timeout: time.Until(deadline)}
@@ -345,29 +328,38 @@ func (t *udpQueryTransport) Close() error {
 	return t.conn.Close()
 }
 
-// exchangeDNSOverConnection sends a synchronous DNS query over this resolver's
-// selected path and returns the authenticated tunnel packet.
+// exchangeDNSOverConnection sends a DNS query and returns the extracted VPN
+// packet, over the client's active transport (UDP, or DNS-over-TCP in TCP mode).
 func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeout time.Duration) (VpnProto.Packet, error) {
-	transportKind := c.preferredResolverTransport(conn.Key)
-	transport, err := c.newQueryTransportOver(conn.ResolverLabel, transportKind)
-	if err != nil {
-		return VpnProto.Packet{}, err
-	}
-	startedAt := c.now()
-	response, err := transport.exchange(query, timeout)
-	_ = transport.Close()
-	if err != nil {
-		c.noteResolverTransportFailure(conn.Key, transportKind, c.now())
-		return VpnProto.Packet{}, err
+	var response []byte
+
+	if c.usesStreamTransport() {
+		transport, err := c.newQueryTransport(conn.ResolverLabel)
+		if err != nil {
+			return VpnProto.Packet{}, err
+		}
+		response, err = transport.exchange(query, timeout)
+		_ = transport.Close()
+		if err != nil {
+			return VpnProto.Packet{}, err
+		}
+	} else {
+		udpConn, err := c.getUDPConn(conn.ResolverLabel)
+		if err != nil {
+			return VpnProto.Packet{}, err
+		}
+		response, err = c.exchangeUDPQueryWithConn(udpConn, query, timeout)
+		if err != nil {
+			_ = udpConn.Close()
+			return VpnProto.Packet{}, err
+		}
+		c.putUDPConn(conn.ResolverLabel, udpConn)
 	}
 
 	packet, err := dnsparser.ExtractVPNResponseMatching(response, c.responseMode == mtuProbeBase64Reply, c.cfg.Domains)
 	if err != nil {
-		c.noteResolverTransportFailure(conn.Key, transportKind, c.now())
 		return VpnProto.Packet{}, err
 	}
-	completedAt := c.now()
-	c.noteResolverTransportSuccess(conn.Key, transportKind, completedAt.Sub(startedAt), completedAt)
 
 	return packet, nil
 }
@@ -377,13 +369,11 @@ func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeou
 // exchanges immediately instead of keeping sockets and HTTP streams alive until
 // their full timeout.
 func (c *Client) exchangeDNSOverConnectionContext(ctx context.Context, conn Connection, query []byte, timeout time.Duration) (VpnProto.Packet, error) {
-	transportKind := c.preferredResolverTransport(conn.Key)
-	transport, err := c.newQueryTransportOver(conn.ResolverLabel, transportKind)
+	transport, err := c.newQueryTransport(conn.ResolverLabel)
 	if err != nil {
 		return VpnProto.Packet{}, err
 	}
 	defer transport.Close()
-	startedAt := c.now()
 
 	type result struct {
 		response []byte
@@ -401,16 +391,8 @@ func (c *Client) exchangeDNSOverConnectionContext(ctx context.Context, conn Conn
 		return VpnProto.Packet{}, ctx.Err()
 	case res := <-done:
 		if res.err != nil {
-			c.noteResolverTransportFailure(conn.Key, transportKind, c.now())
 			return VpnProto.Packet{}, res.err
 		}
-		packet, extractErr := dnsparser.ExtractVPNResponseMatching(res.response, c.responseMode == mtuProbeBase64Reply, c.cfg.Domains)
-		if extractErr != nil {
-			c.noteResolverTransportFailure(conn.Key, transportKind, c.now())
-			return VpnProto.Packet{}, extractErr
-		}
-		completedAt := c.now()
-		c.noteResolverTransportSuccess(conn.Key, transportKind, completedAt.Sub(startedAt), completedAt)
-		return packet, nil
+		return dnsparser.ExtractVPNResponseMatching(res.response, c.responseMode == mtuProbeBase64Reply, c.cfg.Domains)
 	}
 }
