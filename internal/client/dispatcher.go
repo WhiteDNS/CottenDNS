@@ -220,39 +220,6 @@ dispatchLoop:
 			opts.TotalFragments = item.TotalFragments
 		}
 
-		targetCount := c.runtimePacketDuplicationCount(finalPacketType)
-		paths := c.selectJointRuntimePaths(
-			finalPacketType,
-			selectedStreamID,
-			len(finalPayload),
-			targetCount,
-			c.now(),
-		)
-		if len(paths) == 0 {
-			// The global active pool was already checked above. Preserve the
-			// historical route as an emergency fallback if path telemetry is
-			// temporarily incomplete during startup.
-			paths = make([]resolverRuntimePath, 0, len(conns))
-			for _, conn := range conns {
-				decision := c.chooseResolverTransport(
-					conn.Key,
-					Enums.DefaultPacketPriority(finalPacketType),
-					c.now(),
-				)
-				paths = append(paths, resolverRuntimePath{
-					connection: conn,
-					transport:  decision.primary,
-				})
-				if decision.hedge && decision.secondary != decision.primary {
-					paths = append(paths, resolverRuntimePath{
-						connection: conn,
-						transport:  decision.secondary,
-						hedge:      true,
-					})
-				}
-			}
-		}
-
 		task := rawOutboundTask{
 			packetType: finalPacketType,
 			payload:    finalPayload,
@@ -260,7 +227,7 @@ dispatchLoop:
 			wasPacked:  wasPacked,
 			item:       item,
 			selected:   selected,
-			paths:      paths,
+			conns:      conns,
 		}
 
 		select {

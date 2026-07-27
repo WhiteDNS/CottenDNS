@@ -53,32 +53,27 @@ type Client struct {
 	codec    *security.Codec
 	balancer *Balancer
 
-	connections         []Connection
-	connectionsByKey    map[string]int
-	successMTUChecks    bool
-	udpBufferPool       sync.Pool
-	resolverConnsMu     sync.Mutex
-	resolverConns       map[string]chan pooledUDPConn
-	resolverAddrMu      sync.RWMutex
-	resolverAddrCache   map[string]*net.UDPAddr
-	resolverStatsMu     sync.RWMutex
-	resolverPending     map[resolverSampleKey]resolverSample
-	resolverCompleted   map[resolverCompletedKey]time.Time
-	resolverTransportMu sync.Mutex
-	resolverTransports  map[string]*resolverTransportState
-	resolverHealthMu    sync.RWMutex
-	resolverHealth      map[string]*resolverHealthState
-	resolverRecheck     map[string]resolverRecheckState
-	runtimeDisabled     map[string]resolverDisabledState
-	resolverRecheckSem  chan struct{}
+	connections        []Connection
+	connectionsByKey   map[string]int
+	successMTUChecks   bool
+	udpBufferPool      sync.Pool
+	resolverConnsMu    sync.Mutex
+	resolverConns      map[string]chan pooledUDPConn
+	resolverAddrMu     sync.RWMutex
+	resolverAddrCache  map[string]*net.UDPAddr
+	resolverStatsMu    sync.RWMutex
+	resolverPending    map[resolverSampleKey]resolverSample
+	resolverHealthMu   sync.RWMutex
+	resolverHealth     map[string]*resolverHealthState
+	resolverRecheck    map[string]resolverRecheckState
+	runtimeDisabled    map[string]resolverDisabledState
+	resolverRecheckSem chan struct{}
 	// Unix-nanos of the last speculative "discovery" recheck (re-probing a
 	// never-valid resolver). Trickles discovery so it never bursts bandwidth
 	// away from the user's live traffic; see runResolverRecheckBatch.
 	lastDiscoveryRecheckUnix atomic.Int64
 	nowFn                    func() time.Time
 	recheckConnectionFn      func(conn *Connection) bool
-	probeConnectionMTUOverFn func(context.Context, *Connection, int, resolverTransport) (mtuConnectionProbeResult, mtuRejectReason)
-	probeSessionMTUOverFn    func(context.Context, *Connection, resolverTransport) (mtuConnectionProbeResult, bool)
 	resolverRuntimeLogMu     sync.Mutex
 	lastResolverRuntimeLog   string
 	lastResolverRuntimeLogAt time.Time
@@ -183,22 +178,13 @@ type Client struct {
 	txAdmissionDrops                 atomic.Uint64
 	streamDialFailures               atomic.Uint64
 	streamWriteFailures              atomic.Uint64
-	// Warm-path discovery is charged against successful foreground sends. One
-	// bounded MTU refresh is allowed per 4096 original frames (roughly a 1-2%
-	// probe budget even for a conservative 64-query scan), or when the tunnel
-	// has been idle long enough that alternate transport state would go stale.
-	runtimeOriginalSends  atomic.Uint64
-	warmPathBudgetSends   atomic.Uint64
-	warmPathLastScanUnix  atomic.Int64
-	lastFECReceived       atomic.Int64
-	runtimeReadBufferSize int
-	lastRXDropLogUnix     atomic.Int64
+	lastFECReceived                  atomic.Int64
+	runtimeReadBufferSize            int
+	lastRXDropLogUnix                atomic.Int64
 	// injectedNXDOMAINCount counts forged NXDOMAIN responses ignored as on-path
 	// DNS poisoning (see RESOLVER_IGNORE_INJECTED_NXDOMAIN). Purely observational.
 	injectedNXDOMAINCount atomic.Uint64
 	lastInjectionLogUnix  atomic.Int64
-	resolverHijackCount   atomic.Uint64
-	lastHijackLogUnix     atomic.Int64
 
 	// Traffic byte counters (per-session, reset on resetRuntimeBindings)
 	txTotalBytes atomic.Uint64
@@ -222,14 +208,12 @@ type Client struct {
 	// RunInitialMTUTests: "auto" escalates UDP->TCP, while the opt-in encrypted
 	// transports (DoT/DoH) fall back to UDP and then TCP/53 if they cannot carry
 	// the tunnel. All query paths (probe, session-init, health, data plane)
-	// dispatch on it. streamData keeps each required persistent transport warm,
-	// allowing one resolver to use TCP while another uses DoT/DoH without a
-	// client-wide restart.
-	transport    atomic.Int32
-	streamDataMu sync.RWMutex
-	streamData   map[resolverTransport]streamDataTransport
-	dohHTTPMu    sync.Mutex
-	dohHTTP      *http.Client
+	// dispatch on it. streamData carries the persistent per-resolver connections
+	// used by the data plane whenever the transport is not UDP.
+	transport  atomic.Int32
+	streamData streamDataTransport
+	dohHTTPMu  sync.Mutex
+	dohHTTP    *http.Client
 
 	// pacer applies per-resolver adaptive rate limiting (see resolver_pacer.go).
 	pacer *resolverPacer
@@ -292,22 +276,14 @@ type rawOutboundTask struct {
 	wasPacked  bool
 	item       *clientStreamTXPacket
 	selected   *Stream_client
-	paths      []resolverRuntimePath
+	conns      []Connection
 }
 
 type encodedOutboundDatagram struct {
-	addr        *net.UDPAddr
-	serverKey   string
-	packet      []byte
-	priority    int
-	transport   resolverTransport
-	hedge       bool
-	packetType  uint8
-	payloadSize int
-	// replayDepth bounds path-failure recovery. It is deliberately separate
-	// from ARQ retry state: the native frame and session remain unchanged.
-	replayDepth    uint8
-	mayHaveSibling bool
+	addr      *net.UDPAddr
+	serverKey string
+	packet    []byte
+	priority  int
 }
 
 type encodedOutboundTask struct {
@@ -499,9 +475,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		resolverConns:                         make(map[string]chan pooledUDPConn),
 		resolverAddrCache:                     make(map[string]*net.UDPAddr),
 		resolverPending:                       make(map[resolverSampleKey]resolverSample),
-		resolverCompleted:                     make(map[resolverCompletedKey]time.Time),
-		resolverTransports:                    make(map[string]*resolverTransportState),
-		streamData:                            make(map[resolverTransport]streamDataTransport),
 		resolverHealth:                        make(map[string]*resolverHealthState),
 		resolverRecheck:                       make(map[string]resolverRecheckState),
 		runtimeDisabled:                       make(map[string]resolverDisabledState),

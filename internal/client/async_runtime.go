@@ -11,11 +11,9 @@ package client
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
-	"sort"
 	"time"
 
 	"cottendns-go/internal/arq"
@@ -25,43 +23,12 @@ import (
 	fragmentStore "cottendns-go/internal/fragmentstore"
 )
 
-const (
-	poisonReplayMaxDepth  = uint8(1)
-	failureReplayMaxDepth = uint8(2)
-)
-
 const clientRXDropLogInterval = 2 * time.Second
 
 type asyncReadPacket struct {
 	data      []byte
 	addr      *net.UDPAddr
 	localAddr string
-	transport resolverTransport
-}
-
-func (c *Client) stopStreamDataManagers() {
-	c.streamDataMu.Lock()
-	managers := make([]streamDataTransport, 0, len(c.streamData))
-	for transport, manager := range c.streamData {
-		if manager != nil {
-			managers = append(managers, manager)
-		}
-		delete(c.streamData, transport)
-	}
-	c.streamDataMu.Unlock()
-	for _, manager := range managers {
-		manager.Stop()
-	}
-}
-
-func (c *Client) streamDataManager(transport resolverTransport) streamDataTransport {
-	if c == nil {
-		return nil
-	}
-	c.streamDataMu.RLock()
-	manager := c.streamData[transport]
-	c.streamDataMu.RUnlock()
-	return manager
 }
 
 // StopAsyncRuntime stops all running workers (Readers, Writers, Processors).
@@ -70,7 +37,10 @@ func (c *Client) StopAsyncRuntime() {
 	if c.asyncCancel != nil {
 		c.log.Debugf("\U0001F6D1 <yellow>Stopping Async Runtime...</yellow>")
 		c.asyncCancel()
-		c.stopStreamDataManagers()
+		if c.streamData != nil {
+			c.streamData.Stop()
+			c.streamData = nil
+		}
 		c.closeTunnelSockets()
 		c.asyncWG.Wait()
 		c.asyncCancel = nil
@@ -271,7 +241,10 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 			return
 		}
 		cancel()
-		c.stopStreamDataManagers()
+		if c.streamData != nil {
+			c.streamData.Stop()
+			c.streamData = nil
+		}
 		if c.tcpListener != nil {
 			c.tcpListener.Stop()
 			c.tcpListener = nil
@@ -285,13 +258,12 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 		c.resetRuntimeBindings(false)
 	}()
 
-	// 3. Keep every configured path ready concurrently. Auto itself still uses
-	// only UDP/TCP; DoT/DoH are opened only when the user opts into them globally
-	// or for an individual resolver.
-	neededTransports := c.runtimeTransportsNeeded()
-	useUDP := neededTransports[transportUDP]
+	// 3. Open dedicated UDP sockets only for UDP mode. Stream transports own
+	// their sockets and queues; allocating unused UDP descriptors wastes scarce
+	// resources on Android and large resolver fleets.
+	useStream := c.usesStreamTransport()
 	conns := make([]*net.UDPConn, 0, c.tunnelRX_TX_Workers)
-	for i := 0; useUDP && i < c.tunnelRX_TX_Workers; i++ {
+	for i := 0; !useStream && i < c.tunnelRX_TX_Workers; i++ {
 		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 		if err != nil {
 			for _, opened := range conns {
@@ -306,9 +278,6 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 
 	c.tunnelConns = conns
 	c.resetTunnelActivity(c.now())
-	c.runtimeOriginalSends.Store(0)
-	c.warmPathBudgetSends.Store(0)
-	c.warmPathLastScanUnix.Store(c.now().UnixNano())
 
 	c.log.Infof("\U0001F4E1 <cyan>Async Runtime Initialized: <green>%d RX/TX Workers</green>, <green>%d Processors</green></cyan>",
 		c.tunnelRX_TX_Workers, c.tunnelProcessWorkers)
@@ -329,35 +298,22 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 		}
 	}
 
-	// 6. Stream transports feed the same receive channel as UDP and stay warm so
-	// per-resolver switching has no reconnect-wide pause.
-	c.streamDataMu.Lock()
-	c.streamData = make(map[resolverTransport]streamDataTransport, 3)
-	c.streamDataMu.Unlock()
-	for _, transport := range []resolverTransport{transportTCP, transportDoT, transportDoH} {
-		if !neededTransports[transport] {
-			continue
-		}
-		var manager streamDataTransport
-		switch transport {
+	// 6. Spawn ingestion. In UDP mode each socket has a reader worker. In TCP
+	// mode the persistent per-resolver TCP connections feed rxChannel from their
+	// own read loops, so no UDP readers are started.
+	if useStream {
+		active := c.activeTransport()
+		switch active {
 		case transportDoH:
-			manager = newDoHDataManager(c)
+			c.streamData = newDoHDataManager(c)
 		case transportDoT:
-			manager = newDoTDataManager(c)
+			c.streamData = newDoTDataManager(c)
 		default:
-			manager = newTCPDataManager(c)
+			c.streamData = newTCPDataManager(c)
 		}
-		manager.Start(runtimeCtx)
-		c.streamDataMu.Lock()
-		c.streamData[transport] = manager
-		c.streamDataMu.Unlock()
-	}
-	if c.perResolverAutoTransport() {
-		c.log.Infof("\U0001F517 <cyan>Resolver transport: <green>adaptive per resolver</green></cyan>")
+		c.streamData.Start(runtimeCtx)
+		c.log.Infof("\U0001F517 <cyan>Resolver transport: <green>%s</green></cyan>", active)
 	} else {
-		c.log.Infof("\U0001F517 <cyan>Resolver transport: <green>%s</green></cyan>", c.activeTransport())
-	}
-	if useUDP {
 		for i := 0; i < c.tunnelRX_TX_Workers; i++ {
 			c.asyncWG.Add(1)
 			go c.asyncReaderWorker(runtimeCtx, i, conns[i])
@@ -380,7 +336,7 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
 		c.asyncWG.Add(1)
 		var conn *net.UDPConn
-		if useUDP {
+		if !useStream {
 			conn = conns[i]
 		}
 		go c.asyncWriterWorker(runtimeCtx, i, conn)
@@ -573,7 +529,7 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 				return
 			}
 
-			if len(task.paths) == 0 {
+			if len(task.conns) == 0 {
 				if !task.wasPacked && task.selected != nil {
 					task.selected.ReleaseTXPacket(task.item)
 				}
@@ -601,8 +557,7 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 			}
 			frames = frames[:0]
 
-			for _, runtimePath := range task.paths {
-				resolverConn := runtimePath.connection
+			for _, resolverConn := range task.conns {
 				datagramQueryType := c.nextQueryTypeForPath(resolverConn.Key)
 				domain := resolverConn.Domain
 				if domain == "" {
@@ -621,7 +576,7 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 						continue
 					}
 					if preparedDomainByName == nil {
-						preparedDomainByName = make(map[string]preparedTunnelDomain, len(task.paths))
+						preparedDomainByName = make(map[string]preparedTunnelDomain, len(task.conns))
 					}
 					preparedDomainByName[domain] = prepared
 				}
@@ -640,7 +595,7 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 					dnsPacket = firstDNSPacket
 				default:
 					if packetByDomain == nil {
-						packetByDomain = make(map[string][]byte, len(task.paths)-1)
+						packetByDomain = make(map[string][]byte, len(task.conns)-1)
 					}
 					var cached bool
 					cacheKey := domain + "#" + itoaInt(int(datagramQueryType))
@@ -655,14 +610,10 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 				}
 
 				frames = append(frames, encodedOutboundDatagram{
-					addr:        addr,
-					serverKey:   resolverConn.Key,
-					packet:      dnsPacket,
-					priority:    Enums.DefaultPacketPriority(task.packetType),
-					transport:   runtimePath.transport,
-					hedge:       runtimePath.hedge,
-					packetType:  task.packetType,
-					payloadSize: len(task.payload),
+					addr:      addr,
+					serverKey: resolverConn.Key,
+					packet:    dnsPacket,
+					priority:  Enums.DefaultPacketPriority(task.packetType),
 				})
 			}
 
@@ -671,11 +622,6 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 					task.selected.ReleaseTXPacket(task.item)
 				}
 				continue
-			}
-			if len(frames) > 1 {
-				for index := range frames {
-					frames[index].mayHaveSibling = true
-				}
 			}
 
 			encodedTask := encodedOutboundTask{
@@ -707,6 +653,7 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 		localAddr = conn.LocalAddr().String()
 	}
 	refreshWindow := c.tunnelPacketTimeout / 2
+	useStream := c.usesStreamTransport()
 	if refreshWindow < 250*time.Millisecond {
 		refreshWindow = 250 * time.Millisecond
 	}
@@ -719,7 +666,7 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 				return
 			}
 			now := time.Now()
-			if conn != nil && c.tunnelPacketTimeout > 0 {
+			if !useStream && conn != nil && c.tunnelPacketTimeout > 0 {
 				if lastDeadline.IsZero() || now.Add(refreshWindow).After(lastDeadline) {
 					lastDeadline = now.Add(c.tunnelPacketTimeout)
 					_ = conn.SetWriteDeadline(lastDeadline)
@@ -729,196 +676,25 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 				if frame.addr == nil || len(frame.packet) == 0 {
 					continue
 				}
-				if c.sendRuntimeFrameOver(conn, localAddr, frame, frame.transport, now) {
+				if useStream {
+					// TCP/DoT/DoH: route through the persistent per-resolver
+					// transport; Send handles its own send-tracking.
+					if c.streamData != nil {
+						c.streamData.Send(frame.serverKey, frame.addr, frame.packet, frame.priority, now)
+					}
 					continue
 				}
-				c.replayRuntimeFrame(frame, frame.transport, conn, localAddr, failureReplayMaxDepth)
+				if _, err := conn.WriteToUDP(frame.packet, frame.addr); err == nil {
+					c.recordTunnelSend(now)
+					c.trackResolverSend(frame.packet, frame.addr.String(), localAddr, frame.serverKey, now)
+					c.txTotalBytes.Add(uint64(len(frame.packet)))
+				}
 			}
 			if !task.wasPacked && task.selected != nil {
 				task.selected.ReleaseTXPacket(task.item)
 			}
 		}
 	}
-}
-
-func (c *Client) sendRuntimeFrameOver(
-	udpConn *net.UDPConn,
-	localAddr string,
-	frame encodedOutboundDatagram,
-	transport resolverTransport,
-	now time.Time,
-) bool {
-	if c.resolverReplayCompleted(frame, now) {
-		return true
-	}
-	if transport == transportUDP {
-		if udpConn == nil {
-			return false
-		}
-		if _, err := udpConn.WriteToUDP(frame.packet, frame.addr); err == nil {
-			c.recordTunnelSend(now)
-			c.trackResolverFrameOver(frame, localAddr, transportUDP, now)
-			c.txTotalBytes.Add(uint64(len(frame.packet)))
-			c.noteOriginalRuntimeSend(frame)
-			return true
-		} else {
-			c.recordResolverHealthEvent(frame.serverKey, false, now)
-			c.noteResolverTransportFailure(frame.serverKey, transportUDP, now)
-		}
-		return false
-	}
-	if manager := c.streamDataManager(transport); manager != nil {
-		frame.transport = transport
-		if manager.Send(frame, now) {
-			c.noteOriginalRuntimeSend(frame)
-			return true
-		}
-	}
-	c.noteResolverTransportFailure(frame.serverKey, transport, now)
-	return false
-}
-
-func (c *Client) noteOriginalRuntimeSend(frame encodedOutboundDatagram) {
-	if c != nil && frame.replayDepth == 0 && !frame.hedge {
-		c.runtimeOriginalSends.Add(1)
-	}
-}
-
-// replayPendingResolverSample turns an authenticated-question poison signal
-// into a single immediate race on the best alternate path. The original sample
-// stays pending; trackResolverSuccessOver atomically lets only the first genuine
-// tunnel response win.
-func (c *Client) replayPendingResolverSample(key resolverSampleKey, maxDepth uint8) bool {
-	if c == nil {
-		return false
-	}
-	c.resolverStatsMu.Lock()
-	actualKey, sample, ok := c.resolverSampleLocked(key)
-	if !ok || len(sample.packet) == 0 || sample.replayDepth >= maxDepth || sample.replayTriggered {
-		c.resolverStatsMu.Unlock()
-		return false
-	}
-	activeSibling := false
-	for siblingKey, sibling := range c.resolverPending {
-		if siblingKey.dnsID != actualKey.dnsID ||
-			sibling.questionFingerprint != sample.questionFingerprint {
-			continue
-		}
-		if siblingKey != actualKey && !sibling.timedOut {
-			activeSibling = true
-		}
-	}
-	sample.replayTriggered = true
-	c.resolverPending[actualKey] = sample
-	c.resolverStatsMu.Unlock()
-	// A normal hedge is already the desired Happy-Eyeballs race.
-	if activeSibling {
-		return true
-	}
-	frame := encodedOutboundDatagram{
-		serverKey:   sample.serverKey,
-		packet:      sample.packet,
-		priority:    sample.priority,
-		transport:   sample.transport,
-		packetType:  sample.packetType,
-		payloadSize: sample.payloadSize,
-		replayDepth: sample.replayDepth,
-	}
-	return c.replayRuntimeFrame(frame, sample.transport, nil, "", maxDepth)
-}
-
-// replayRuntimeFrame reuses the exact DNS query and native tunnel frame on an
-// alternate resolver/transport. No session handshake or ARQ wait is involved.
-// Replays are bounded and are never recursively duplicated by normal hedging.
-func (c *Client) replayRuntimeFrame(
-	frame encodedOutboundDatagram,
-	failed resolverTransport,
-	udpConn *net.UDPConn,
-	localAddr string,
-	maxDepth uint8,
-) bool {
-	if c == nil || len(frame.packet) == 0 || frame.replayDepth >= maxDepth {
-		return false
-	}
-
-	type replayCandidate struct {
-		connection Connection
-		transport  resolverTransport
-		score      float64
-	}
-	candidates := make([]replayCandidate, 0, 8)
-	connections := c.connections
-	if c.balancer != nil {
-		connections = c.balancer.AllValidConnectionsIncludingBackup()
-	}
-	eligible := make([]Connection, 0, len(connections))
-	for _, conn := range connections {
-		if conn.IsValid && conn.Key != "" && !c.isRuntimeDisabledResolver(conn.Key) {
-			eligible = append(eligible, conn)
-		}
-	}
-	c.resolverTransportMu.Lock()
-	for _, conn := range eligible {
-		state := c.resolverTransportStateLocked(conn.Key)
-		for _, transport := range c.resolverTransportCandidates(conn.Key) {
-			if conn.Key == frame.serverKey && transport == failed {
-				continue
-			}
-			pathScore := pathScoreFor(state, transport)
-			if !pathSupportsPacket(pathScore, frame.packetType, frame.payloadSize) {
-				continue
-			}
-			score := pathEstimatedGoodputForPacket(pathScore, frame.packetType)
-			if !pathScore.probed {
-				score = fallbackConnectionPathScore(conn, frame.packetType) * 0.5
-			}
-			candidates = append(candidates, replayCandidate{
-				connection: conn,
-				transport:  transport,
-				score:      score,
-			})
-		}
-	}
-	c.resolverTransportMu.Unlock()
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].score == candidates[j].score {
-			if candidates[i].connection.Key == candidates[j].connection.Key {
-				return candidates[i].transport < candidates[j].transport
-			}
-			return candidates[i].connection.Key < candidates[j].connection.Key
-		}
-		return candidates[i].score > candidates[j].score
-	})
-
-	for _, candidate := range candidates {
-		addr, err := c.getResolverUDPAddr(candidate.connection)
-		if err != nil {
-			continue
-		}
-		replay := frame
-		replay.addr = addr
-		replay.serverKey = candidate.connection.Key
-		replay.transport = candidate.transport
-		replay.hedge = false
-		replay.replayDepth++
-		replay.mayHaveSibling = true
-
-		if udpConn != nil {
-			if c.sendRuntimeFrameOver(udpConn, localAddr, replay, replay.transport, c.now()) {
-				return true
-			}
-			continue
-		}
-		select {
-		case c.encodedTXChannel <- encodedOutboundTask{frames: []encodedOutboundDatagram{replay}}:
-			return true
-		default:
-			// A saturated writer queue is congestion, not permission to amplify
-			// it. ARQ remains the final recovery layer.
-			return false
-		}
-	}
-	return false
 }
 
 // asyncReaderWorker reads raw UDP data and pushes to the rxChannel (Internal Queue).
@@ -963,7 +739,7 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 			packetData := buf[:n]
 
 			select {
-			case c.rxChannel <- asyncReadPacket{data: packetData, addr: addr, localAddr: localAddr, transport: transportUDP}:
+			case c.rxChannel <- asyncReadPacket{data: packetData, addr: addr, localAddr: localAddr}:
 			default:
 				// Queue full! Drop packet and RECYCLE buffer.
 				c.udpBufferPool.Put(buf)
@@ -982,7 +758,7 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 		case <-ctx.Done():
 			return
 		case pkt := <-c.rxChannel:
-			c.handleInboundPacketOver(pkt.data, pkt.addr, pkt.localAddr, pkt.transport)
+			c.handleInboundPacket(pkt.data, pkt.addr, pkt.localAddr)
 
 			// RECYCLE buffer back to the pool.
 			c.udpBufferPool.Put(pkt.data[:cap(pkt.data)])
@@ -992,15 +768,7 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 
 // handleInboundPacket is the central entry point for all received tunnel packets.
 func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr string) {
-	c.handleInboundPacketOver(data, addr, localAddr, c.activeTransport())
-}
-
-func (c *Client) handleInboundPacketOver(data []byte, addr *net.UDPAddr, localAddr string, transport resolverTransport) {
 	// c.log.Debugf("Inbound packet from %v (%d bytes)", addr, len(data))
-	validQuestion, questionFingerprint := c.validateInboundQuestionFingerprint(data, addr, localAddr, transport)
-	if !validQuestion {
-		return
-	}
 
 	// 1. Extract VPN Packet from DNS Response (TXT chunks or, for A2 rotated
 	// queries, a CNAME answer decoded against the configured tunnel domains).
@@ -1008,35 +776,18 @@ func (c *Client) handleInboundPacketOver(data []byte, addr *net.UDPAddr, localAd
 	if err != nil {
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()
-			if parsed, parseErr := DnsParser.ParsePacketLite(data); parseErr == nil {
-				if transport == transportUDP && parsed.Header.TC != 0 {
-					// TC=1 is a direct indication that this UDP carrier cannot
-					// deliver the answer. Consume the attempt as a hard path
-					// failure so the resolver moves to TCP without waiting for
-					// repeated timeouts. ARQ retains the native frame.
-					c.replayPendingResolverSample(resolverSampleKey{
-						resolverAddr:        addr.String(),
-						localAddr:           localAddr,
-						dnsID:               binary.BigEndian.Uint16(data[:2]),
-						transport:           transport,
-						questionFingerprint: dnsQuestionFingerprint(data),
-					}, failureReplayMaxDepth)
-					c.trackResolverHardFailureOver(data, addr, localAddr, transport, receivedAt)
-					return
-				}
-				if parsed.Header.RCode != 0 && c.rcodeIsInjectedNoise(parsed.Header.RCode) {
+			if parsed, parseErr := DnsParser.ParsePacketLite(data); parseErr == nil && parsed.Header.RCode != 0 {
+				if c.rcodeIsInjectedNoise(parsed.Header.RCode) {
 					// On-path DNS poisoning: a forged NXDOMAIN raced the real
 					// answer. Ignore it WITHOUT consuming the pending query
 					// sample, so the genuine response can still be scored as a
 					// success (or time out if the resolver is truly dead). This
 					// stops the censor from throttling/disabling working
 					// resolvers — and their share of forged failures — for free.
-					c.noteInjectedResolverNoise(data, addr, localAddr, transport)
+					c.noteInjectedResolverNoise(addr)
 					return
 				}
-				if parsed.Header.RCode != 0 {
-					c.trackResolverFailureOver(data, addr, localAddr, transport, receivedAt)
-				}
+				c.trackResolverFailure(data, addr, localAddr, receivedAt)
 			}
 			// summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
 			// c.log.Debugf("DNS response from %v had no tunnel TXT payload | %s", addr, summary)
@@ -1046,16 +797,7 @@ func (c *Client) handleInboundPacketOver(data []byte, addr *net.UDPAddr, localAd
 		return
 	}
 
-	// DNS question matching proves that the reply belongs to this query; the
-	// native session identity proves that its tunnel frame belongs to the live
-	// session. Do not let a syntactically valid forged frame win a replay race.
-	if c.sessionReady &&
-		(vpnPacket.SessionID != c.sessionID || vpnPacket.SessionCookie != c.sessionCookie) {
-		return
-	}
-	if !c.trackResolverSuccessOverFingerprint(data, addr, localAddr, transport, time.Now(), questionFingerprint) {
-		return
-	}
+	c.trackResolverSuccess(data, addr, localAddr, time.Now())
 	// if c.log != nil && c.log.Enabled(logger.LevelDebug) && vpnPacket.PacketType != Enums.PACKET_PONG {
 	// 	if vpnPacket.PacketType == Enums.PACKET_STREAM_DATA_ACK {
 	// 		c.log.Debugf("Client received ACK | Stream: %d | Seq: %d", vpnPacket.StreamID, vpnPacket.SequenceNum)
