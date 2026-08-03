@@ -213,29 +213,6 @@ jobs:
             go_os: darwin
             cgo_enabled: "0"
             smoke_test: false
-          - os: ubuntu-22.04
-            platform: Termux
-            arch: arm64
-            ext: ""
-            package: tar.gz
-            go_arch: arm64
-            go_os: android
-            cgo_enabled: "0"
-            smoke_test: false
-          - os: ubuntu-22.04
-            platform: Termux
-            arch: armv7
-            ext: ""
-            package: tar.gz
-            go_arch: arm
-            go_arm: "7"
-            go_os: android
-            cgo_enabled: "1"
-            android_ndk: true
-            android_api: "21"
-            android_cc: armv7a-linux-androideabi21-clang
-            android_cxx: armv7a-linux-androideabi21-clang++
-            smoke_test: false
 
     steps:
       - name: Checkout repository
@@ -246,30 +223,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Set up Java 17 for Android builds
-        if: ${{ matrix.android_ndk }}
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        if: ${{ matrix.android_ndk }}
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android NDK
-        if: ${{ matrix.android_ndk }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sdkmanager --sdk_root="${ANDROID_SDK_ROOT}" "ndk;27.2.12479018"
-          NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/27.2.12479018"
-          test -x "${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.android_cc }}"
-          test -x "${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.android_cxx }}"
-          echo "ANDROID_NDK_ROOT=${NDK_ROOT}" >> "$GITHUB_ENV"
-          echo "CC=${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.android_cc }}" >> "$GITHUB_ENV"
-          echo "CXX=${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.android_cxx }}" >> "$GITHUB_ENV"
 
       - name: Install goversioninfo
         if: ${{ matrix.go_os == 'windows' }}

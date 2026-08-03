@@ -112,12 +112,12 @@ func parseFromLabelsAnyMatching(labels string, codecs []*security.Codec, startId
 		fallbackIdx = -1
 		lastErr     error
 	)
-	for offset := 0; offset < n; offset++ {
-		idx := (startIdx + offset) % n
-		codec := codecs[idx]
-		if codec == nil {
-			continue
+	for trial := 0; trial < n; trial++ {
+		idx := codecTrialIndex(codecs, startIdx, trial)
+		if idx < 0 {
+			break
 		}
+		codec := codecs[idx]
 		raw, err := codec.DecodeStringAndDecrypt(labels)
 		if err != nil {
 			lastErr = err
@@ -154,9 +154,22 @@ func parseFromLabelsAnyMatching(labels string, codecs []*security.Codec, startId
 
 		switch {
 		case nativeOK && !legacyOK:
-			return native, idx, nil
+			// AEAD already proves the decoder. Legacy ciphers do not, so use
+			// server session/pre-session semantics before allowing one of them
+			// to claim ciphertext that may belong to another legacy method.
+			if security.IsAuthenticatedMethod(codec.Method()) || match == nil || match(native) {
+				return native, idx, nil
+			}
+			if fallbackIdx < 0 {
+				fallback, fallbackIdx = native, idx
+			}
 		case legacyOK && !nativeOK:
-			return legacy, idx, nil
+			if security.IsAuthenticatedMethod(codec.Method()) || match == nil || match(legacy) {
+				return legacy, idx, nil
+			}
+			if fallbackIdx < 0 {
+				fallback, fallbackIdx = legacy, idx
+			}
 		case nativeOK && legacyOK:
 			if match != nil {
 				if match(native) {
@@ -193,10 +206,10 @@ func ParseFromLabelsAny(labels string, codecs []*security.Codec, startIdx int) (
 	}
 
 	var lastErr error
-	for offset := 0; offset < n; offset++ {
-		idx := (startIdx + offset) % n
-		if codecs[idx] == nil {
-			continue
+	for trial := 0; trial < n; trial++ {
+		idx := codecTrialIndex(codecs, startIdx, trial)
+		if idx < 0 {
+			break
 		}
 		packet, err := ParseFromLabels(labels, codecs[idx])
 		if err == nil {
@@ -208,6 +221,43 @@ func ParseFromLabelsAny(labels string, codecs []*security.Codec, startIdx int) (
 		lastErr = ErrCodecUnavailable
 	}
 	return Packet{}, -1, lastErr
+}
+
+// codecTrialIndex preserves the preferred codec fast path within each security
+// class while always exhausting authenticated codecs before attempting an
+// unauthenticated decoder. This matters because XOR/ChaCha20/None cannot prove
+// that decrypted bytes came from their method: random ciphertext can
+// occasionally resemble a structurally valid frame. AES-GCM candidates do
+// authenticate, so they must never be placed behind those ambiguous decoders.
+//
+// The codec set is tiny (at most the six supported methods), making this
+// allocation-free two-phase walk cheaper than constructing a reordered slice
+// for every DNS packet.
+func codecTrialIndex(codecs []*security.Codec, startIdx, trial int) int {
+	n := len(codecs)
+	if n == 0 || trial < 0 {
+		return -1
+	}
+	if startIdx < 0 || startIdx >= n {
+		startIdx = 0
+	}
+
+	seen := 0
+	for phase := 0; phase < 2; phase++ {
+		wantAuthenticated := phase == 0
+		for offset := 0; offset < n; offset++ {
+			idx := (startIdx + offset) % n
+			codec := codecs[idx]
+			if codec == nil || security.IsAuthenticatedMethod(codec.Method()) != wantAuthenticated {
+				continue
+			}
+			if seen == trial {
+				return idx
+			}
+			seen++
+		}
+	}
+	return -1
 }
 
 func ParseInflated(data []byte) (Packet, error) {

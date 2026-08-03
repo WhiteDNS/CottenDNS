@@ -7,16 +7,14 @@ helps** on hostile DNS networks. Honest caveats are called out where they exist.
 
 ---
 
-## Android engine ownership and embedding
+## External mobile engine boundary
 
-The Android-facing engine is now maintained in this repository instead of as a
-modified source copy inside the app. Android CI checks out an immutable
-CottenDNS revision and builds all four ABIs with
-`scripts/build-android-client.sh`. This removes the source/binary drift that can
-make branch builds work while merged-main builds silently package an older
-engine.
+This repository owns the portable engine source only. Mobile repositories pin
+and import a reviewed CottenDNS revision, then own all Android compilation,
+packaging, signing, and release logic. CottenDNS intentionally ships no Android
+build scripts or binary artifacts.
 
-The standalone client includes the app integration contract:
+The portable client source includes the engine behavior:
 
 - Fast Connect releases startup after a safe MTU-tested pool is available,
   throttles the remaining scan to background priority, and promotes newly found
@@ -30,9 +28,6 @@ The standalone client includes the app integration contract:
   sockets from consuming the engine indefinitely.
 - Generic UDP, fallback to the DNS-specific UDP path, loss recovery, adaptive
   duplication, and server fairness remain in the same versioned source.
-
-The Android integration and pinned-revision rules are documented in
-`docs/ANDROID_ENGINE_INTEGRATION.md`.
 
 ---
 
@@ -228,7 +223,18 @@ change its encryption method without the server being reconfigured.
 (3–5 are AEAD). With `ENCRYPTION_AUTO_DETECT` (default true), the server builds a
 codec set and trial-decrypts each inbound frame, **AEAD methods first** (they
 authenticate, so they cannot be mis-detected), falling back to the unauthenticated
-ciphers. The first codec that yields a valid frame is used.
+ciphers. Runtime preference is preserved inside each security class, but it can
+never move XOR, ChaCha20, or plaintext ahead of an AES-GCM candidate.
+
+The unauthenticated legacy methods need an additional rule: a one-byte header
+check alone cannot prove which stream cipher produced a frame. Their decoded
+candidates are therefore checked against live session ID/cookie/layout state.
+Pre-session MTU candidates also have their response mode, requested download
+size, and zero-filled capacity padding validated before a legacy codec may claim
+them. If an old or malformed pre-session frame matches none of those stricter
+rules, the historical structural fallback remains available, preserving old
+MasterDNS/StormDNS admission rather than turning hardening into a compatibility
+break.
 
 **Why it helps.** A client can pick a rarer/stronger cipher (or rotate) and the
 server simply reads it. AEAD-first ordering avoids false positives from the
@@ -389,10 +395,11 @@ length-prefixed, routed through the **exact same** transport-agnostic
 load-shedding, graceful shutdown — so all tunnel logic (sessions, FEC, channels,
 encryption) is shared with UDP, no duplication.
 
-**Client.** Client-wide transport via `RESOLVER_TRANSPORT = auto | udp | tcp`:
-- **`auto` (default)** probes over UDP first; if **zero** resolvers pass MTU
-  testing, it flips to TCP and **re-probes the whole fleet over TCP/53**. On a
-  UDP-working network TCP is never attempted (zero cost).
+**Client.** Resolver-local transport policy via
+`RESOLVER_TRANSPORT = auto | udp | tcp`:
+- **`auto` (default)** measures UDP and TCP/53 for every resolver, then keeps
+  each resolver on its fastest healthy path. A bad UDP path can switch without
+  moving the rest of the fleet.
 - A `queryExchanger` abstraction makes the probe, session-init, and health paths
   transport-agnostic.
 - A persistent **per-resolver TCP connection manager** (`tcp_data.go`) serves the
@@ -666,8 +673,9 @@ doh  ─► UDP ─► TCP/53          tcp  ─► (no fallback)
 auto ─► UDP ─► TCP/53
 ```
 
-The chain is `resolverTransportChain()`; the walk is in `RunInitialMTUTests`,
-which re-probes the whole fleet on each step down.
+The chain is `resolverTransportChain()` and MTU discovery walks it independently
+for each resolver. The background scanner keeps alternate paths measured after
+startup.
 
 ### 17.2 How they are wired into the data path
 
@@ -707,10 +715,9 @@ from the entry plus the transport's own port/path, so `1.1.1.1` becomes
 `https://1.1.1.1:443/dns-query`. Cloudflare, Google and Quad9 publish certificates
 carrying their **IP as a SAN**, so (A) validates with no configuration at all.
 
-*Caveat:* the transport and its port/path are client-wide, not per-resolver. You
-cannot run one resolver over DoH while another stays on UDP, and providers using a
-different path cannot be mixed in one profile. The hedging is sequential
-(fallback), not parallel.
+Per-resolver overrides were added later in §25. The encrypted transport's
+port/path and TLS identity remain shared, but individual resolvers can now select
+`auto`, `udp`, `tcp`, `dot`, or `doh`.
 
 ### 17.4 Certificate trust
 
@@ -1115,7 +1122,267 @@ than merely accepting it as a configuration value.
 
 ---
 
+## 25. Poison-aware per-resolver transport and path MTU
+
+Transport selection is now resolver-local instead of a whole-client fallback.
+`RESOLVER_TRANSPORT_PATHS` can override the global policy by connection key,
+resolver label, IP:port, or IP. `auto` measures UDP and TCP/53 for each resolver;
+DoT and DoH remain explicit user choices and retain UDP/TCP survival fallbacks.
+
+Initial MTU discovery probes every configured path separately and stores its RTT,
+loss, upload MTU, and download MTU. A bounded background scanner performs full
+MTU discovery on one rotating resolver/transport path at a time at
+`RESOLVER_TRANSPORT_BACKGROUND_SCAN_INTERVAL_SECONDS`, keeping alternate paths
+fresh without creating a scan burst or competing materially with user traffic.
+Selection uses estimated delivered goodput and will move a resolver away from a
+slow, failing, poisoned, or session-MTU-incompatible path. Bulk packets use only
+the best path; sparse high-priority/control traffic may hedge one alternate at a
+bounded interval, so duplication cannot cap bulk throughput.
+
+The runtime scheduler now scores `(resolver, transport)` jointly for the actual
+native packet type and payload size. MTU probe capacity is normalized for each
+packet header before eligibility is checked. A resolver or transport below the
+global session MTU is therefore not dead capacity: it can carry ACKs, controls,
+and any data fragment that fits, while larger fragments remain on wider paths.
+Stream affinity receives a small stability bias, not a hard pin, preventing
+reordering between equivalent paths without trapping a stream on a materially
+slower route. Bulk data never uses an unmeasured transport.
+
+If local UDP transmission, persistent TCP/DoT dialing/writing, or a DoH exchange
+fails, the exact unacknowledged DNS query is replayed immediately on the best
+eligible alternate resolver/transport. Replay preserves the native frame,
+session, and sequence identity, is capped at two path hops, and does not wait for
+the full ARQ RTO. ARQ/NACK remains the correctness backstop after the bounded
+fast replay is exhausted.
+
+Inbound replies are bound to resolver address, local socket, transport, query ID,
+and the complete DNS question. Same-ID replies carrying a different question are
+treated as injection and ignored. When injected NXDOMAIN filtering is enabled,
+the forged answer no longer consumes the outstanding request, allowing a genuine
+answer arriving moments later to win. Poison is evidence that an alternate path
+must be compared, not an automatic penalty against a UDP path that remains the
+fastest working option.
+
+Question fingerprints canonicalize ASCII letter case because DNS names are
+case-insensitive; resolvers that normalize 0x20 casing are accepted without
+weakening QTYPE/QCLASS or name matching. A UDP reply carrying `TC=1` replays the
+affected request immediately, but UDP is displaced only after repeated
+truncation evidence without an intervening valid reply. Poison evidence
+accelerates a following timeout for two minutes, then expires so an old incident
+cannot make a clean future network overly sensitive.
+
+An unusually fast forged response also acts as a Happy-Eyeballs trigger. The
+still-pending query is raced once on the best alternate path; the original is not
+cancelled, and the first response that passes DNS-question and native tunnel
+authentication atomically claims all replay siblings. Existing control hedges
+count as the alternate, preventing poison from causing duplicate amplification.
+
+Background path exploration is congestion-aware and capacity-budgeted. One
+rotating full MTU refresh is charged per 4096 original foreground frames, a
+conservative approximately 1-2% allowance using a 64-query scan cost model.
+No scan starts when TX, encoded-TX, RX, or pending-query pressure is elevated.
+Completely idle paths receive a stale-state refresh no more often than every two
+minutes (or four configured scan intervals), but even that exception yields to a
+single queued user packet.
+
+The final speed audit ranks replay candidates across the complete eligible
+`(resolver, transport)` set instead of preferring the same resolver by default.
+The common non-duplicated response path no longer scans the complete pending map,
+DNS question fingerprints are parsed once per normal ingress, and immutable
+encoded DNS frames are retained rather than copied into each pending/stream
+queue. Transport-manager publication is protected during runtime teardown.
+Poison/timeout correlation also accepts the timeout deadline being a few
+milliseconds earlier than the adjacent poison event, eliminating an
+event-ordering-dependent missed fast switch found by repeated race testing.
+
+After three successful samples, pending-query blackhole detection uses a
+conservative RTT-derived deadline (`6 × RTT + 500 ms`, with a 1.5-second floor
+and the configured request timeout as its ceiling). Slow/high-jitter paths retain
+the configured timeout. Late genuine replies remain claimable during the
+existing grace period and retract their timeout observation.
+
+The server remains transport-agnostic: UDP, TCP, DoT, and DoH feed the same
+authenticated native packet handler and keep the client's selected settings
+dynamic. The server's Super-FEC band now chooses enough parity for a 90% modeled
+block-recovery target, within Reed-Solomon and configured caps. Randomized loss
+tests exercise actual encoding and reconstruction at 40% and 84% loss; ARQ
+remains the correctness backstop when a block exceeds its parity budget.
+
+---
+
+## 26. Unified directional path and redundancy controller
+
+`PATH_CONTROLLER_MODE = "unified"` coordinates the client-side mechanisms that
+previously made partially independent decisions. It adds no protocol fields and
+requires no server change. `PATH_CONTROLLER_MODE = "legacy"` immediately
+restores the preceding behavior for field rollback.
+
+Each resolver/transport now retains separate authenticated upload and download
+delivery EWMAs, sample confidence, RTT, and failure streaks. A failed ACK poll no
+longer reduces the score of an otherwise healthy upload path, and one fast sample
+cannot outrank a mature path. Packet-size MTU eligibility and the existing
+transport hysteresis remain mandatory gates.
+
+The controller produces one decision per packet. During queue pressure it
+suppresses only copies added by adaptive duplication, never the configured base.
+Recent download FEC retains the established two-poll diversity cap, and healthy
+exploration cannot stack on FEC or existing duplication. Poison/failure recovery
+hedges remain available for high-priority traffic, while ARQ remains the
+eventual-delivery backstop.
+
+With `COMPARABLE_PATH_STRIPING = true`, successive bulk upload packets may rotate
+across at most four resolver paths. A candidate needs at least three
+authenticated directional samples, at least 85% of the primary delivered score,
+and RTT within 35% of the primary. Striping sends exactly one copy, stops when
+queues are congested, and never admits an unknown or materially slower path.
+Weighted multiplicative stepping avoids long bursts on one resolver.
+
+Traffic telemetry reports `stripe` decisions and `saved` redundant copies beside
+exploration and transport-switch counters. This makes the controller observable
+without adding probe traffic.
+
+---
+
+## 27. Final controller and dynamic-encryption validation
+
+The final bug hunt found that rotating the server's last-successful codec index
+could put an unauthenticated decoder ahead of an authenticated one. A random
+legacy decode occasionally passed the compact header check, causing admission
+telemetry to credit the wrong method. Codec iteration is now two-phase and
+allocation-free: every AES-GCM candidate is exhausted first, followed by the
+legacy class in preferred order. Established legacy candidates must match active
+session state, and MTU discovery uses the semantic checks described in section 5.
+
+Dynamic server behavior was tested as a response-producing matrix, not merely as
+"packet accepted": every enabled encryption method was sent through UDP, TCP/53,
+DoT, and DoH, and the returned native MTU response had to contain the original
+four-byte verification nonce. A keyed server accepted methods 1-5; a server
+explicitly configured to allow plaintext accepted methods 0-5. The plaintext
+method remains excluded when the configured server method is encrypted.
+
+Validation on the 2026-07-29 working tree:
+
+- complete uncached repository tests and `go vet`;
+- complete repository race detector;
+- hostile-network race matrix repeated 20 times, covering poison, question
+  hijack, in-flight replay, MTU path selection, UDP/TCP/DoT/DoH, and 40%/75%/84%
+  FEC reconstruction;
+- mixed codec admission repeated 200 times and the response-producing
+  transport/encryption matrix repeated 10 times;
+- country, legacy, and native profile loading repeated 50 times;
+- shuffled complete client tests repeated 10 times;
+- Linux/Windows client and server packaging through `build.py`; and
+- all engine packages cross-compiled for Android arm64, armv7, amd64, and 386
+  with CGO disabled.
+
+The unified controller's clean decision costs 19.42-19.95 ns with zero
+allocations. The sixteen-resolver joint selector measures 3.48-3.57 microseconds
+with three allocations. Under congestion, an adaptive five-copy decision is
+reduced to the configured one-copy base (80% fewer redundant frames). In a
+two-comparable-path simulation, 1000 one-copy bulk packets split 526/474 without
+duplication. Directional evidence retained 100% of a healthy direction's score
+after the opposite direction failed; legacy shared evidence retained 29.2%.
+
+The local one-resolver end-to-end A/B result is intentionally conservative:
+unified and legacy modes were within loopback noise (median upload +0.8%,
+download +0.5% for unified). The controller is not claiming artificial
+single-path bandwidth. Its measurable gain appears when paths diverge or queues
+fill: it avoids redundant congestion, stops cross-direction false demotion, and
+uses comparable capacity without adding copies.
+
+---
+
 *All changes keep ARQ as the correctness backstop; every optimization above is
 designed to fail safe — if FEC, MTU grouping, a carrier, or a transport channel
 does not help on a given path, the tunnel still delivers through the surviving
 resolver/path combination.*
+
+## 28. Fresh resolver validation on every launch
+
+Resolver reachability, poisoning behavior, transport quality, loss, and MTU can
+change between two process launches on the target networks. Reusing a
+previous-run resolver cache could therefore start the client on paths that are
+no longer usable and could exclude newly useful resolvers.
+
+Cache-assisted startup is now disabled at every supported entrypoint:
+
+- the command-line client always bootstraps from the current resolver source;
+- default, legacy `ask`, and legacy `logs` startup values normalize to
+  `resolvers`;
+- `BootstrapFromLogs` remains source-compatible for older desktop/Android
+  wrappers but intentionally delegates to normal fresh bootstrap and ignores
+  cache entries;
+- resolver-mode MTU retry/timeout/parallelism values are always selected;
+- the Linux service installer rewrites old `ask`/`logs` values to `resolvers`;
+  and
+- resolver-cache log files remain diagnostic output only.
+
+`FAST_CONNECT` preserves good startup experience without stale state: the client
+releases a newly validated starter pool, then continues scanning the remaining
+current-list resolvers in the background at bounded parallelism. No resolver is
+accepted because it worked in a previous process.
+
+## 29. Sustained DNS-over-TCP flow control
+
+Small interactive exchanges could succeed over TCP/53 while sustained media
+traffic filled the fixed stream-transport queue. The old non-blocking admission
+path then discarded newly encoded frames, leaving ARQ to recover them later.
+Combined with unrestricted DNS pipelining and TCP head-of-line blocking, this
+could turn a temporary resolver slowdown into a retransmission loop.
+
+The TCP/53 and DoT data manager now applies lossless backpressure:
+
+- a full stream queue pauses upstream writers instead of dropping fresh frames;
+- each persistent connection permits at most 32 unanswered DNS queries;
+- the historical two connection stripes remain the clean-path baseline;
+- queue pressure raises the stripe count gradually to four, six, and at most
+  eight, returning to the two-stripe decision when pressure clears;
+- a connection with no response progress is closed so blocked senders wake and
+  the existing bounded cross-path replay can recover; and
+- DNS-over-TCP framing completes partial socket writes instead of assuming one
+  `Write` call consumed the complete message.
+
+The server now handles up to 32 pipelined queries concurrently per TCP/DoT
+connection. Response writes remain serialized at DNS-message boundaries, and
+the existing global/per-IP connection budgets still bound overload. No native
+packet, encryption, session, carrier, or legacy wire format changed.
+
+Focused tests cover queue backpressure, shutdown cancellation, inflight-window
+release, pressure-based stripe scaling, partial writes, and concurrent
+server-side pipelining. The full repository tests, `go vet`, native
+client/server builds, and Android engine cross-builds for arm64, armv7, amd64,
+and 386 pass with CGO disabled. Windows race execution was unavailable on this
+workstation because its configured MinGW compiler path no longer exists; the
+CI release matrix remains the authoritative clean-environment build check.
+
+## 30. Busy-tunnel UDP restoration
+
+An availability failure could demote a resolver from configured-first UDP to
+TCP, after which the resolver could remain on TCP for the whole session. The
+full background MTU sweep correctly yields whenever foreground traffic is
+active, while ordinary healthy exploration rejects a path already marked
+non-viable. Reducing the generic 1/1024 exploration interval alone therefore
+could not repair the ratchet.
+
+Availability restoration now has a separate authenticated foreground channel:
+
+- one restoration ticket accrues per 64 original DNS frames (at most 1.5625%
+  additional queries in a single-copy configuration);
+- when duplication already exists, one duplicate is replaced by the canary, so
+  the query count does not increase;
+- only control/setup frames are eligible, and existing FEC or another hedge
+  prevents stacking;
+- restoration remains active under ordinary sustained load but stops at 75%
+  queue occupancy;
+- failed/non-viable configured-first paths are eligible, which is essential
+  after a startup UDP miss;
+- two authenticated configured-first wins are required, a failure resets the
+  evidence, and the ten-second speed-switch cooldown prevents flapping; and
+- full idle MTU discovery remains available for exact path remeasurement.
+
+A deterministic 48-resolver sustained-load test restores the complete fleet
+from TCP to UDP in 6,144 foreground frames using 96 authenticated canaries. The
+measured worst-case query ratio is 96/6,144 = 1.5625%; the duplicated-path test
+keeps three configured copies at exactly three while substituting one UDP
+canary. Moderate 25% queue occupancy still permits restoration, while 75%
+occupancy suppresses it. Focused and complete client tests pass.

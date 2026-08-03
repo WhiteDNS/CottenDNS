@@ -211,6 +211,58 @@ func TestServeTCPDNSMessages_MaxQueriesPerConn(t *testing.T) {
 	}
 }
 
+func TestServeTCPDNSMessagesProcessesPipelineConcurrently(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	const queryCount = 8
+	started := make(chan struct{}, queryCount)
+	release := make(chan struct{})
+	handler := func(q []byte) []byte {
+		started <- struct{}{}
+		<-release
+		return append([]byte(nil), q...)
+	}
+	go func() {
+		serveTCPDNSMessagesWithOptions(context.Background(), server, handler, tcpServerOptions{
+			readIdleTimeout: 2 * time.Second,
+			writeTimeout:    2 * time.Second,
+			maxInFlight:     queryCount,
+		})
+		_ = server.Close()
+	}()
+
+	for i := 0; i < queryCount; i++ {
+		if err := writeTCPDNSMessage(client, []byte{byte(i + 1)}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	for i := 0; i < queryCount; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("only %d/%d pipelined handlers started concurrently", i, queryCount)
+		}
+	}
+	close(release)
+
+	seen := make(map[byte]bool, queryCount)
+	for i := 0; i < queryCount; i++ {
+		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+		response, err := readTCPDNSMessage(client)
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if len(response) != 1 {
+			t.Fatalf("response %d length=%d want=1", i, len(response))
+		}
+		seen[response[0]] = true
+	}
+	if len(seen) != queryCount {
+		t.Fatalf("received %d/%d distinct pipelined responses", len(seen), queryCount)
+	}
+}
+
 func TestReserveTCPIPSlotHonorsLimitAndRelease(t *testing.T) {
 	activeByIP := map[string]int{}
 	var mu sync.Mutex

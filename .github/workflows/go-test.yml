@@ -83,8 +83,9 @@ jobs:
   android-engine:
     runs-on: ubuntu-latest
 
-    # Android-source contract: this repo is checked out at a pinned commit and
-    # built as the WhiteDNS Android app's native engine. Cross-compile all four
+    # Android-source contract: this repo is consumed as a pinned source snapshot by the
+    # WhiteDNS Android app, which builds the native engine itself from this
+    # source — no Android artifact is released here. Cross-compile all four
     # ABIs through scripts/build-android-client.sh on every push so main can never
     # silently stop being a valid Android engine source. Uses the NDK preinstalled
     # on the runner rather than downloading a pinned one — this validates the build
