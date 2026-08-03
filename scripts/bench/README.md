@@ -27,6 +27,7 @@ go run scripts/bench/bench.go -runs 3 -bytes 10485760
 | `-force-build` | Rebuild server and client binaries | true |
 | `-client-port` | Port for the local client listener | 18080 |
 | `-server-port` | Port for the UDP server listener | 5300 |
+| `-path-controller` | Compare `unified` or rollback `legacy` client behavior | unified |
 
 ---
 

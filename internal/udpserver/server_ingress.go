@@ -127,9 +127,9 @@ func (s *Server) matchesInboundPacketCandidate(packet VpnProto.Packet) bool {
 	case Enums.PACKET_SESSION_INIT:
 		return packet.SessionID == 0 && len(packet.Payload) == sessionInitDataSize
 	case Enums.PACKET_MTU_UP_REQ:
-		return packet.SessionID == 255 && len(packet.Payload) >= mtuProbeUpMinSize
+		return packet.SessionID == 255 && validMTUUpCandidatePayload(packet.Payload)
 	case Enums.PACKET_MTU_DOWN_REQ:
-		return packet.SessionID == 255 && len(packet.Payload) >= mtuProbeDownMinSize
+		return packet.SessionID == 255 && validMTUDownCandidatePayload(packet.Payload)
 	}
 
 	if packet.SessionID == 0 {
@@ -137,4 +137,37 @@ func (s *Server) matchesInboundPacketCandidate(packet VpnProto.Packet) bool {
 	}
 	lookup, ok := s.sessions.Lookup(packet.SessionID)
 	return ok && lookup.Cookie == packet.SessionCookie && lookup.LegacySessionID == packet.LegacySessionID
+}
+
+func validMTUUpCandidatePayload(payload []byte) bool {
+	if len(payload) < mtuProbeUpMinSize {
+		return false
+	}
+	if _, ok := parseMTUProbeBaseEncoding(payload[0]); !ok {
+		return false
+	}
+	// Native and legacy clients zero-fill the capacity probe after its response
+	// mode and four-byte nonce. Checking that padding makes a wrong
+	// unauthenticated decoder extraordinarily unlikely to steal a valid probe.
+	return allZero(payload[mtuProbeUpMinSize:])
+}
+
+func validMTUDownCandidatePayload(payload []byte) bool {
+	if len(payload) < mtuProbeDownMinSize || !validMTUUpCandidatePayload(payload[:mtuProbeUpMinSize]) {
+		return false
+	}
+	downloadSize := int(payload[mtuProbeUpMinSize])<<8 | int(payload[mtuProbeUpMinSize+1])
+	if downloadSize < mtuProbeMinDownSize || downloadSize > mtuProbeMaxDownSize {
+		return false
+	}
+	return allZero(payload[mtuProbeDownMinSize:])
+}
+
+func allZero(data []byte) bool {
+	for _, value := range data {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
 }

@@ -19,12 +19,13 @@ import (
 )
 
 var (
-	runs       = flag.Int("runs", 3, "Number of runs for each direction")
-	payloadMiB = flag.Int("bytes", 100*1024*1024, "Payload size in bytes (default 100MiB)")
-	forceBuild = flag.Bool("force-build", true, "Force rebuilding binaries")
-	benchPort  = flag.Int("bench-port", 19090, "Legacy port (not used much now with dynamic targets)")
-	clientPort = flag.Int("client-port", 18080, "Port for the CottenDns client listener")
-	serverPort = flag.Int("server-port", 5300, "Port for the CottenDns server UDP listener")
+	runs           = flag.Int("runs", 3, "Number of runs for each direction")
+	payloadMiB     = flag.Int("bytes", 100*1024*1024, "Payload size in bytes (default 100MiB)")
+	forceBuild     = flag.Bool("force-build", true, "Force rebuilding binaries")
+	benchPort      = flag.Int("bench-port", 19090, "Legacy port (not used much now with dynamic targets)")
+	clientPort     = flag.Int("client-port", 18080, "Port for the CottenDns client listener")
+	serverPort     = flag.Int("server-port", 5300, "Port for the CottenDns server UDP listener")
+	pathController = flag.String("path-controller", "unified", "Client path controller: unified or legacy")
 
 	// Standalone / slipstream-like flags
 	optMode         = flag.String("mode", "", "Standalone mode: 'sink', 'source', 'send', 'recv'")
@@ -71,6 +72,9 @@ func nowAsTs() float64 {
 
 func main() {
 	flag.Parse()
+	if *pathController != "unified" && *pathController != "legacy" {
+		log.Fatalf("Invalid -path-controller %q (want unified or legacy)", *pathController)
+	}
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	if *optMode != "" {
@@ -80,7 +84,8 @@ func main() {
 
 	fmt.Printf("🚀 Starting CottenDns Go-Benchmark (slipstream-style timing)\n")
 	fmt.Printf("📂 Working Dir: %s\n", benchDir)
-	fmt.Printf("💾 Payload: %.2f MiB | Runs: %d\n\n", float64(*payloadMiB)/(1024*1024), *runs)
+	fmt.Printf("💾 Payload: %.2f MiB | Runs: %d | Controller: %s\n\n",
+		float64(*payloadMiB)/(1024*1024), *runs, *pathController)
 
 	if err := setupDirs(); err != nil {
 		log.Fatalf("Failed to setup directories: %v", err)
@@ -261,6 +266,8 @@ func runOnce(ctx context.Context, direction string, runIndex int) (BenchResult, 
 	DOMAINS = ["a.io"]
 	ENCRYPTION_KEY = "%s"
 	RESOLVER_BALANCING_STRATEGY = 1
+	PATH_CONTROLLER_MODE = "%s"
+	COMPARABLE_PATH_STRIPING = true
 	DATA_ENCRYPTION_METHOD = 3
 	UPLOAD_PACKET_DUPLICATION_COUNT = 1
 	DOWNLOAD_PACKET_DUPLICATION_COUNT = 1
@@ -314,7 +321,7 @@ func runOnce(ctx context.Context, direction string, runIndex int) (BenchResult, 
 	ARQ_MAX_CONTROL_RETRIES = 300
 	ARQ_DATA_NACK_INITIAL_DELAY_SECONDS = 0.35
 	ARQ_DATA_NACK_REPEAT_SECONDS = 0.8
-	`, *clientPort, encryptionKey)), 0644)
+	`, *clientPort, encryptionKey, *pathController)), 0644)
 
 	absClientBin, _ := filepath.Abs(filepath.Join(binDir, "client.exe"))
 	clientCmd := exec.Command(absClientBin, "--config", clientCfg)

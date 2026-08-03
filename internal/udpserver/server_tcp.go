@@ -26,21 +26,24 @@ import (
 )
 
 const (
-	tcpReadIdleTimeout  = 30 * time.Second
-	tcpWriteTimeout     = 15 * time.Second
-	tcpMaxMessageLength = 65535
+	tcpReadIdleTimeout             = 30 * time.Second
+	tcpWriteTimeout                = 15 * time.Second
+	tcpMaxMessageLength            = 65535
+	tcpMaxConcurrentQueriesPerConn = 32
 )
 
 type tcpServerOptions struct {
 	readIdleTimeout   time.Duration
 	writeTimeout      time.Duration
 	maxQueriesPerConn int
+	maxInFlight       int
 }
 
 func defaultTCPServerOptions() tcpServerOptions {
 	return tcpServerOptions{
 		readIdleTimeout: tcpReadIdleTimeout,
 		writeTimeout:    tcpWriteTimeout,
+		maxInFlight:     tcpMaxConcurrentQueriesPerConn,
 	}
 }
 
@@ -159,9 +162,16 @@ func serveTCPDNSMessagesWithOptions(ctx context.Context, conn net.Conn, handler 
 	if opts.writeTimeout <= 0 {
 		opts.writeTimeout = tcpWriteTimeout
 	}
+	if opts.maxInFlight <= 0 {
+		opts.maxInFlight = tcpMaxConcurrentQueriesPerConn
+	}
 
 	lenBuf := make([]byte, 2)
 	queries := 0
+	inflight := make(chan struct{}, opts.maxInFlight)
+	var handlers sync.WaitGroup
+	var writeMu sync.Mutex
+	defer handlers.Wait()
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return
@@ -185,24 +195,46 @@ func serveTCPDNSMessagesWithOptions(ctx context.Context, conn net.Conn, handler 
 			return
 		}
 
-		response := handler(msg)
-		if len(response) == 0 {
-			// No tunnel response for this query; keep the connection open for
-			// the next pipelined message rather than dropping it.
-			continue
+		if ctx == nil {
+			inflight <- struct{}{}
+		} else {
+			select {
+			case inflight <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 		}
-		if len(response) > tcpMaxMessageLength {
-			response = response[:tcpMaxMessageLength]
-		}
+		handlers.Add(1)
+		go func(query []byte) {
+			defer handlers.Done()
+			defer func() { <-inflight }()
 
-		out := make([]byte, 2+len(response))
-		binary.BigEndian.PutUint16(out[:2], uint16(len(response)))
-		copy(out[2:], response)
+			response := handler(query)
+			if len(response) == 0 {
+				// No tunnel response for this query; keep the connection open for
+				// the next pipelined message rather than dropping it.
+				return
+			}
+			if len(response) > tcpMaxMessageLength {
+				response = response[:tcpMaxMessageLength]
+			}
 
-		_ = conn.SetWriteDeadline(time.Now().Add(opts.writeTimeout))
-		if _, err := conn.Write(out); err != nil {
-			return
-		}
+			out := make([]byte, 2+len(response))
+			binary.BigEndian.PutUint16(out[:2], uint16(len(response)))
+			copy(out[2:], response)
+
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			_ = conn.SetWriteDeadline(time.Now().Add(opts.writeTimeout))
+			for len(out) > 0 {
+				n, err := conn.Write(out)
+				if err != nil || n <= 0 {
+					_ = conn.Close()
+					return
+				}
+				out = out[n:]
+			}
+		}(msg)
 	}
 }
 

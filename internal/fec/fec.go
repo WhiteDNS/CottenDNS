@@ -20,6 +20,7 @@ package fec
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 
 	"github.com/klauspost/reedsolomon"
 )
@@ -177,4 +178,62 @@ func ParityForLoss(dataShards int, lossFrac float64) int {
 		parity = maxShards - dataShards
 	}
 	return parity
+}
+
+// ParityForLossTarget returns enough parity for a requested block-recovery
+// probability under independent random loss. ParityForLoss guarantees only the
+// expected survivor count plus one shard; at extreme loss that succeeds in
+// roughly half of random blocks. Super-FEC uses this stronger calculation so an
+// 84% link has a useful recovery probability instead of a merely possible one.
+func ParityForLossTarget(dataShards int, lossFrac, recoveryTarget float64) int {
+	if dataShards < 1 {
+		return 0
+	}
+	if lossFrac < 0 {
+		lossFrac = 0
+	}
+	if lossFrac > 0.95 {
+		lossFrac = 0.95
+	}
+	if recoveryTarget <= 0 || recoveryTarget >= 1 {
+		recoveryTarget = 0.90
+	}
+	minParity := ParityForLoss(dataShards, lossFrac)
+	for total := dataShards + minParity; total <= maxShards; total++ {
+		if shardRecoveryProbability(total, dataShards, 1-lossFrac) >= recoveryTarget {
+			return total - dataShards
+		}
+	}
+	return MaxParity(dataShards)
+}
+
+// shardRecoveryProbability is P(X >= required) for X surviving shards out of
+// total under independent survival probability p.
+func shardRecoveryProbability(total, required int, p float64) float64 {
+	if required <= 0 {
+		return 1
+	}
+	if total < required || p <= 0 {
+		return 0
+	}
+	if p >= 1 {
+		return 1
+	}
+	// Sum the failure tail P(X < required) using the binomial recurrence. With
+	// at most 256 shards this is stable and far cheaper than an encode.
+	q := 1 - p
+	term := math.Pow(q, float64(total)) // P(X=0)
+	failure := term
+	for k := 0; k < required-1; k++ {
+		term *= float64(total-k) / float64(k+1) * p / q
+		failure += term
+	}
+	recovery := 1 - failure
+	if recovery < 0 {
+		return 0
+	}
+	if recovery > 1 {
+		return 1
+	}
+	return recovery
 }

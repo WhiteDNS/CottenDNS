@@ -163,6 +163,36 @@ func TestParseInflatedFromLabelsAnyPreferredFirstStillWorks(t *testing.T) {
 	}
 }
 
+func TestCodecTrialOrderNeverPlacesLegacyBeforeAEAD(t *testing.T) {
+	set, err := security.NewCodecSet(security.AllMethods, autoDetectKey)
+	if err != nil {
+		t.Fatalf("NewCodecSet: %v", err)
+	}
+
+	for _, start := range []int{0, 1, 2, 3, 4, 5} {
+		authenticatedDone := false
+		authenticatedCount := 0
+		for trial := 0; trial < len(set); trial++ {
+			idx := codecTrialIndex(set, start, trial)
+			if idx < 0 {
+				t.Fatalf("start %d trial %d returned no codec", start, trial)
+			}
+			authenticated := security.IsAuthenticatedMethod(set[idx].Method())
+			if !authenticated {
+				authenticatedDone = true
+				continue
+			}
+			if authenticatedDone {
+				t.Fatalf("start %d put authenticated method %d after a legacy decoder", start, set[idx].Method())
+			}
+			authenticatedCount++
+		}
+		if authenticatedCount != 3 {
+			t.Fatalf("start %d tried %d authenticated methods, want 3", start, authenticatedCount)
+		}
+	}
+}
+
 func TestParseInflatedFromLabelsAnyEmptySet(t *testing.T) {
 	if _, _, err := ParseInflatedFromLabelsAny("abc", nil, 0); err == nil {
 		t.Fatal("expected error for empty codec set")

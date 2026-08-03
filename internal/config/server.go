@@ -411,8 +411,8 @@ func LoadServerConfigWithOverrides(filename string, overrides ServerConfigOverri
 
 func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 	cfg.ConfigPreset = normalizeConfigPresetName(cfg.ConfigPreset)
-	if !isKnownConfigPreset(cfg.ConfigPreset) {
-		return cfg, fmt.Errorf("invalid CONFIG_PRESET: %q (valid: default, speed, survival, tcp-survival)", cfg.ConfigPreset)
+	if !isKnownServerConfigPreset(cfg.ConfigPreset) {
+		return cfg, fmt.Errorf("invalid CONFIG_PRESET: %q (valid: %s)", cfg.ConfigPreset, serverConfigPresetNames)
 	}
 
 	cfg.ProtocolType = defaultString(strings.ToUpper(strings.TrimSpace(cfg.ProtocolType)), "SOCKS5")

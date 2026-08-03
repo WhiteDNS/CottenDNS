@@ -21,6 +21,7 @@ logs/
 *.tmp
 *.exe
 build/
+dist/
 .gocache/
 .gocache-audit/
 .bench/
@@ -35,3 +36,6 @@ cmd/*/resource_windows_*.syso
 .gochache/
 .android-build-audit/
 .tmp-android-engine-upstream/
+
+# Local engineering audit (human-readable, intentionally not committed)
+reports/cottendns-network-engineering-audit.html

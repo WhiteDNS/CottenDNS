@@ -31,6 +31,19 @@ func isKnownConfigPreset(name string) bool {
 	}
 }
 
+// Server preset validation remains independent from the client preset set.
+// Keep these helpers here because server.go uses them during final validation.
+const serverConfigPresetNames = "default, speed, survival, tcp-survival"
+
+func isKnownServerConfigPreset(name string) bool {
+	switch normalizeConfigPresetName(name) {
+	case "default", "speed", "survival", "tcp-survival":
+		return true
+	default:
+		return false
+	}
+}
+
 func configKeyUnset(isDefined configKeyDefinedFunc, key string) bool {
 	return isDefined == nil || !isDefined(key)
 }
