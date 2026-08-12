@@ -41,6 +41,8 @@
 | I want to… | Go to |
 | --- | --- |
 | Deploy a new tunnel | [Complete setup guide](#complete-setup-guide) |
+| Add IPv6 and automatic fallback | [IPv4 and IPv6 setup](#ipv4-and-ipv6-setup) |
+| Harden a public server | [Flood and abuse protection](#flood-and-abuse-protection) |
 | Run the server with Docker | [Docker server installation](#docker-server-installation) |
 | Understand the adaptive transport system | [Automatic behavior](#automatic-behavior) |
 | Pick a speed or survival profile | [Choose a profile](#choose-a-profile) |
@@ -221,6 +223,68 @@ ns.example.com.
 
 If the NS result is missing, stop here and fix delegation. Client tuning cannot compensate for incorrect DNS records.
 
+### IPv4 and IPv6 setup
+
+IPv6 is optional. The recommended arrangement keeps IPv4 as the preferred path
+and uses IPv6 when the user supplies IPv6 resolvers and IPv4 becomes unhealthy.
+The VPS must have a routed public IPv6 address; a link-local address is not
+enough.
+
+Add an AAAA glue record beside the existing A record:
+
+```dns-zone
+ns.example.com.  300  IN  A     203.0.113.10
+ns.example.com.  300  IN  AAAA  2001:db8:100::10
+v.example.com.   300  IN  NS    ns.example.com.
+```
+
+Allow inbound UDP/53 and TCP/53 for both address families in the provider and
+host firewalls. Then enable the IPv6 listeners in `server_config.toml`:
+
+```toml
+# On normal Linux dual-stack hosts this accepts UDP DNS over IPv6 and IPv4.
+UDP_HOST = "::"
+
+TCP_LISTENER_ENABLED = true
+TCP_IPV6_ENABLED = true
+TCP_IPV6_HOST = "::"
+
+# Optional: carry response data in dense AAAA records as well as using IPv6 as
+# the network carrier. These are independent features.
+AAAA_RECORD_DATA_DELIVERY = true
+```
+
+Restart and verify the actual sockets. Do not assume the provider enabled IPv6
+or that a platform treats `[::]` as dual-stack:
+
+```bash
+sudo systemctl restart cottendns
+sudo ss -lnup | grep ':53 '
+sudo ss -lntp | grep ':53 '
+dig @2001:db8:100::10 v.example.com SOA +tcp
+```
+
+List reachable recursive resolvers on the client. Brackets are required when an
+IPv6 literal includes a port:
+
+```text
+1.1.1.1:53
+8.8.8.8:53
+[2606:4700:4700::1111]:53
+[2001:4860:4860::8888]:53
+```
+
+Use automatic family selection in `client_config.toml`:
+
+```toml
+RESOLVER_IP_MODE = "auto"
+RESOLVER_TRANSPORT = "auto"
+```
+
+`auto` prefers healthy IPv4 paths and activates supplied IPv6 paths when IPv4
+cannot establish or maintain the session. Use `ipv4`, `ipv6`, or `dual` only
+when you deliberately want to restrict or concurrently operate both families.
+
 ### Step 2 — Prepare the server
 
 Confirm that port 53 is not unexpectedly occupied:
@@ -282,6 +346,73 @@ journalctl -u cottendns -n 100 --no-pager
 ```
 
 The metrics listener intentionally binds to localhost. Do not expose port `9090` publicly just to make these checks work.
+
+### Flood and abuse protection
+
+CottenDNS is an Internet-facing authoritative DNS service, so application
+limits complementâ€”but do not replaceâ€”provider DDoS filtering. Keep the VPS
+provider firewall limited to the ports you use (normally UDP/53, TCP/53, and a
+restricted management port). Never expose the local metrics port `9090`.
+
+Start with authenticated encryption. AES-GCM methods 3â€“5 reject unauthenticated
+frames before session work; plaintext method 0 should never be used on a public
+server. If every client is under your control, set method 5 on both sides and
+disable auto-detection so legacy unauthenticated codecs are not accepted. Keep
+auto-detection only when compatibility with mixed clients is required. Protect
+`encrypt_key.txt`, because a user with the shared key is an authorized tunnel
+client and can generate valid workload.
+
+The default server sample enables layered resource ceilings:
+
+| Threat | Protection |
+| --- | --- |
+| Random UDP/DNS packet flood | Cheap DNS/domain/decryption admission before bounded worker queues |
+| UDP queue memory exhaustion | `MAX_CONCURRENT_REQUESTS`, `MAX_INGRESS_QUEUE_BYTES`, and `MAX_PACKET_SIZE` |
+| Session and stream creation | `MAX_ACTIVE_SESSIONS` and `MAX_STREAMS_PER_SESSION` |
+| TCP/53, DoT, or DoH idle connection flood | `TCP_MAX_CONNS`, `TCP_MAX_CONNS_PER_IP`, idle deadlines, and a reserved plain-TCP budget |
+| DoH request/body flood | `DOH_MAX_INFLIGHT`, `DOH_MAX_INFLIGHT_BYTES`, request-rate and burst limits |
+| IPv6 privacy-address rotation | Per-client TCP and DoH identities are grouped by IPv6 `/64`; IPv4 remains per address |
+| Forged forwarding headers | DoH honors headers only from `DOH_TRUSTED_PROXY_CIDRS` and walks proxy chains from the trusted side |
+| Address/cardinality memory attack | DoH limiter and invalid-cookie tracking state are hard-bounded instead of growing indefinitely |
+
+Recommended public-server baseline:
+
+```toml
+DATA_ENCRYPTION_METHOD = 5
+ENCRYPTION_AUTO_DETECT = false
+
+MAX_CONCURRENT_REQUESTS = 16384
+MAX_INGRESS_QUEUE_BYTES = 67108864
+MAX_PACKET_SIZE = 4096
+MAX_ACTIVE_SESSIONS = 2048
+MAX_STREAMS_PER_SESSION = 4096
+
+TCP_MAX_CONNS = 2048
+TCP_MAX_CONNS_PER_IP = 128
+TCP_READ_IDLE_TIMEOUT_SECONDS = 30.0
+
+DOH_MAX_INFLIGHT = 256
+DOH_MAX_INFLIGHT_BYTES = 67108864
+DOH_REQUESTS_PER_SECOND_PER_IP = 4096
+DOH_REQUEST_BURST_PER_IP = 8192
+```
+
+Only configure `DOH_TRUSTED_PROXY_CIDRS` when DoH is actually behind a reverse
+proxy, and list only the exact proxy addresses or internal proxy subnets. An
+overly broad trusted range lets arbitrary hosts claim forwarded identities.
+
+UDP DNS commonly arrives from shared recursive resolvers, and source addresses
+can be spoofed in direct attacks. CottenDNS therefore protects UDP globally with
+authenticated early admission, byte/count-bounded queues, bounded sessions,
+and load shedding instead of applying a naive per-source limit that could let
+one attacker block an entire public resolver. For volumetric floods that fill
+the network link before the process sees packets, enable the VPS provider's
+DDoS protection or an upstream DNS-aware firewall.
+
+Monitor `/metrics` over localhost and investigate sustained increases in queue
+drops, admission rejects, session-table pressure, connection rejects, or DoH
+rate-limit responses. Raise limits only after confirming CPU, memory, file
+descriptors, and network capacity have headroom.
 
 ### Docker server installation
 

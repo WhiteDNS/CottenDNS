@@ -291,9 +291,9 @@ func tcpRemoteIPKey(addr net.Addr) string {
 	}
 	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {
-		return addr.String()
+		return clientIPLimitKey(addr.String())
 	}
-	return host
+	return clientIPLimitKey(host)
 }
 
 func reserveTCPIPSlot(ip string, limit int, mu *sync.Mutex, activeByIP map[string]int) bool {

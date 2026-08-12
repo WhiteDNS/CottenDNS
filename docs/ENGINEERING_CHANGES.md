@@ -790,6 +790,16 @@ trusted-proxy handling: behind a reverse proxy the rate limiter keys on the
 *forwarded* client address, and the per-IP **connection** cap is disabled, since
 otherwise every user would share the proxy's single ceiling.
 
+IPv6 abuse identities are normalized to `/64` for direct TCP/53, DoT, DoH
+connection limits, and DoH request buckets, preventing privacy-address rotation
+inside one delegated subnet from resetting a per-client ceiling. IPv4 remains
+per-address. The DoH token-bucket map has a hard identity ceiling and fails
+closed for new keys at saturation. Trusted `X-Forwarded-For` chains are walked
+right-to-left, skipping only configured proxy hops, so a spoofed leftmost entry
+cannot select an arbitrary rate-limit identity. Invalid-cookie tracking is also
+hard-bounded; excess unique combinations are rejected without allocating new
+tracking records.
+
 ### 17.7 Why it helps
 
 On a network that fingerprints plaintext 53, the tunnel stops looking like a DNS
