@@ -60,9 +60,9 @@ func reusePortControl(_, _ string, c syscall.RawConn) error {
 // stay open, connections already sitting in that listener's accept queue are
 // reset rather than redistributed. That is acceptable here because the whole
 // set is only ever closed together, at shutdown.
-func listenTCPReusePort(address string) (net.Listener, error) {
+func listenTCPReusePort(network, address string) (net.Listener, error) {
 	lc := net.ListenConfig{Control: reusePortControl}
-	return lc.Listen(context.Background(), "tcp", address)
+	return lc.Listen(context.Background(), network, address)
 }
 
 func listenUDPReusePort(addr *net.UDPAddr) (*net.UDPConn, error) {

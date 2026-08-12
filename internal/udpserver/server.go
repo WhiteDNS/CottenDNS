@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"sync"
@@ -567,10 +568,11 @@ func (s *Server) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	conns, err := s.listenUDP(&net.UDPAddr{
-		IP:   net.ParseIP(s.cfg.UDPHost),
-		Port: s.cfg.UDPPort,
-	})
+	listenAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.cfg.UDPHost, strconv.Itoa(s.cfg.UDPPort)))
+	if err != nil {
+		return fmt.Errorf("resolve UDP listen address: %w", err)
+	}
+	conns, err := s.listenUDP(listenAddr)
 
 	if err != nil {
 		return err

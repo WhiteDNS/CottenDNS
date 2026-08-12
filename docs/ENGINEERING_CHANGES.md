@@ -199,6 +199,8 @@ record type* it queries, and the server to answer with a matching record type.
     with a root TargetName — looks like an ordinary service record.
   - `A` → IPv4 A-records (`internal/dnsparser/transport_arecord.go`,
     index byte + 3 data bytes/record, reorder-safe, ~766 B cap, opt-in).
+  - `AAAA` → IPv6 AAAA records (`internal/dnsparser/transport_aaaarecord.go`,
+    index byte + 15 data bytes/record, reorder-safe, ~3838 B cap, opt-in).
   - other types → CNAME target, with automatic fallback to TXT for large frames.
   The client's `ExtractVPNResponseMatching` auto-detects and decodes whichever
   channel was used, so no negotiation is required.
@@ -206,10 +208,11 @@ record type* it queries, and the server to answer with a matching record type.
 **Why it helps.** It breaks the "all-TXT" fingerprint, lets the client adapt to
 resolvers/paths that handle some record types better than others, and keeps the
 answer RR-type a legal match for the question (important for resolvers that
-validate that). IPv6/AAAA is intentionally not used as a data channel because the
-target networks commonly block IPv6.
+validate that). AAAA delivery stays disabled by default because some target
+networks interfere with it, but operators can enable it independently of the
+outer IP family.
 
-**Validation.** Round-trip tests for NULL/HTTPS/SVCB/A; an end-to-end test runs
+**Validation.** Round-trip tests for NULL/HTTPS/SVCB/A/AAAA; an end-to-end test runs
 the client rotating `["TXT","CNAME","NULL","HTTPS"]` and echoes 64 KB intact.
 
 ---
@@ -393,7 +396,10 @@ are deliberately *not* the chosen fallback.)
 length-prefixed, routed through the **exact same** transport-agnostic
 `safeHandlePacket`. Default on (`TCP_LISTENER_ENABLED`), connection-capped,
 load-shedding, graceful shutdown — so all tunnel logic (sessions, FEC, channels,
-encryption) is shared with UDP, no duplication.
+encryption) is shared with UDP, no duplication. By default an explicit `tcp6`
+listener also binds `[::]:53` (`TCP_IPV6_ENABLED`, `TCP_IPV6_HOST`) alongside
+the IPv4 listener. The two families share one global connection budget; a host
+without IPv6 keeps serving IPv4 instead of failing startup.
 
 **Client.** Resolver-local transport policy via
 `RESOLVER_TRANSPORT = auto | udp | tcp`:
@@ -554,6 +560,8 @@ preset is malformed before that point.
 
 **Server (`server_config.toml`):**
 - `TCP_LISTENER_ENABLED` (true) / `TCP_MAX_CONNS` (2048) — DNS-over-TCP/53 listener.
+- `TCP_IPV6_ENABLED` (true) / `TCP_IPV6_HOST` (`::`) — explicit IPv6 TCP/53
+  listener alongside IPv4, with a shared connection budget and IPv4-safe startup.
 - `TCP_MAX_CONNS_PER_IP` (128) / `TCP_MAX_QUERIES_PER_CONN` (0) /
   `TCP_READ_IDLE_TIMEOUT_SECONDS` (30.0) / `TCP_WRITE_TIMEOUT_SECONDS` (15.0) —
   TCP/53 survival-path guardrails.

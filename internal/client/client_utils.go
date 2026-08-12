@@ -1,4 +1,4 @@
-﻿// ==============================================================================
+// ==============================================================================
 // CottenDNS
 // Author: tajirax
 // Github: https://github.com/TaJirax/CottenDns
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"cottendns-go/internal/arq"
+	"cottendns-go/internal/config"
 	Enums "cottendns-go/internal/enums"
 	"cottendns-go/internal/logger"
 	"cottendns-go/internal/version"
@@ -569,10 +570,24 @@ func (c *Client) Connections() []Connection {
 func (c *Client) BuildConnectionMap() error {
 	domains := c.cfg.Domains
 	resolvers := c.cfg.Resolvers
+	if c.cfg.ResolverIPMode == "ipv4" || c.cfg.ResolverIPMode == "ipv6" {
+		filtered := make([]config.ResolverAddress, 0, len(resolvers))
+		wantIPv6 := c.cfg.ResolverIPMode == "ipv6"
+		for _, resolver := range resolvers {
+			ip := net.ParseIP(resolver.IP)
+			if ip != nil && (ip.To4() == nil) == wantIPv6 {
+				filtered = append(filtered, resolver)
+			}
+		}
+		resolvers = filtered
+	}
 
 	total := len(domains) * len(resolvers)
 	if total <= 0 {
-		return fmt.Errorf("Domains or Resolvers are missing in config.")
+		if len(domains) == 0 {
+			return fmt.Errorf("domains are missing in config")
+		}
+		return fmt.Errorf("no %s resolvers are available for RESOLVER_IP_MODE=%q", strings.ToUpper(c.cfg.ResolverIPMode), c.cfg.ResolverIPMode)
 	}
 
 	connections := make([]Connection, 0, total)

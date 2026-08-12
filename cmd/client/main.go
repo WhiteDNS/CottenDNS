@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"cottendns-go/internal/client"
+	"cottendns-go/internal/clientui"
 	"cottendns-go/internal/config"
 	"cottendns-go/internal/runtimepath"
 	"cottendns-go/internal/version"
@@ -134,22 +135,31 @@ func main() {
 		return
 	}
 
-	app.PrintBanner()
-
 	log := app.Log()
-	if log != nil {
-		log.Infof("\U0001F680 <green>CottenDns Client Started</green>")
-		log.Infof("\U0001F4C4 <green>Configuration loaded from: <cyan>%s</cyan></green>", resolvedConfigPath)
-		log.Infof("\U0001F5C2  <green>Connection Catalog: <cyan>%d</cyan> domain-resolver pairs</green>", len(app.Connections()))
-	}
-
-	// Wait for termination signal
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.Run(sigCtx); err != nil {
+	intro := func() {
+		app.PrintBanner()
 		if log != nil {
-			log.Errorf("Runtime error: %v", err)
+			status := app.StatusSnapshot()
+			log.Infof("\U0001F680 <green>CottenDns Client Started</green>")
+			log.Infof("\U0001F4C4 <green>Configuration loaded from: <cyan>%s</cyan></green>", resolvedConfigPath)
+			log.Infof("\U0001F5C2  <green>Connection Catalog: <cyan>%d</cyan> domain-resolver pairs</green>", len(app.Connections()))
+			log.Infof("<cyan>Resolver IP mode:</cyan> <yellow>%s</yellow> <gray>(IPv4 %d, IPv6 %d)</gray>", status.FamilyMode, status.ConfiguredIPv4, status.ConfiguredIPv6)
+		}
+	}
+
+	var runErr error
+	if clientui.ShouldUse(app.TerminalUIMode()) {
+		runErr = clientui.Run(sigCtx, app, intro)
+	} else {
+		intro()
+		runErr = app.Run(sigCtx)
+	}
+	if runErr != nil {
+		if log != nil {
+			log.Errorf("Runtime error: %v", runErr)
 		}
 	}
 

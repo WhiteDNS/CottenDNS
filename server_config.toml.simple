@@ -54,6 +54,13 @@ UDP_PORT = 53
 # back to TCP without any change to the tunnel. Default on. TCP_MAX_CONNS caps
 # concurrent TCP connections (0 = built-in default).
 TCP_LISTENER_ENABLED = true
+
+# Open an explicit IPv6 DNS-over-TCP/53 listener alongside the normal listener.
+# This uses tcp6 directly instead of relying on OS-dependent [::] dual-stack
+# behavior, so IPv4 and IPv6 share the same tunnel handler and global limits.
+# Set false only when the host has no IPv6 stack or another service owns [::]:53.
+TCP_IPV6_ENABLED = true
+TCP_IPV6_HOST = "::"
 TCP_MAX_CONNS = 2048
 
 # TCP/53 survival-path guardrails. These protect the fallback listener from
@@ -437,9 +444,15 @@ ENCRYPTION_AUTO_DETECT = true
 # carrying the frame (index byte + 3 data bytes per record) instead of a CNAME.
 # This is an additional anti-fingerprinting channel alongside TXT/CNAME, not a
 # replacement: it holds up to ~766 bytes per response, and larger frames fall
-# back to CNAME/TXT automatically. IPv6/AAAA is intentionally not used because
-# the target networks block IPv6. Default false (off).
+# back to CNAME/TXT automatically. Default false (off).
 A_RECORD_DATA_DELIVERY = false
+
+# Optional IPv6 AAAA delivery channel. An AAAA query is answered with indexed
+# AAAA records carrying 15 data bytes per record (five times the density of the
+# A-record channel). Records are reorder-safe and oversized frames fall back to
+# CNAME/TXT. This works even when the resolver hop itself uses IPv4, but remains
+# off by default because some restricted networks interfere with AAAA answers.
+AAAA_RECORD_DATA_DELIVERY = false
 
 # Forward Error Correction on the download path (tier-2 packet-loss reducer).
 # When enabled the server encodes outgoing STREAM_DATA into Reed-Solomon blocks
