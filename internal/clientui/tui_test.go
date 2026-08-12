@@ -8,12 +8,25 @@ import (
 	"cottendns-go/internal/client"
 )
 
-func TestShouldUseExplicitModes(t *testing.T) {
-	if !ShouldUse("tui") {
-		t.Fatal("forced TUI mode was ignored")
+func TestShouldUseRequiresRealTerminal(t *testing.T) {
+	tests := []struct {
+		name                string
+		mode                string
+		stdinTTY, stdoutTTY bool
+		want                bool
+	}{
+		{name: "auto terminal", mode: "auto", stdinTTY: true, stdoutTTY: true, want: true},
+		{name: "requested terminal", mode: "tui", stdinTTY: true, stdoutTTY: true, want: true},
+		{name: "plain terminal", mode: "plain", stdinTTY: true, stdoutTTY: true, want: false},
+		{name: "requested with stdin pipe", mode: "tui", stdoutTTY: true, want: false},
+		{name: "requested with stdout pipe", mode: "tui", stdinTTY: true, want: false},
 	}
-	if ShouldUse("plain") {
-		t.Fatal("plain mode enabled the TUI")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldUse(test.mode, test.stdinTTY, test.stdoutTTY); got != test.want {
+				t.Fatalf("shouldUse(%q, %t, %t) = %t, want %t", test.mode, test.stdinTTY, test.stdoutTTY, got, test.want)
+			}
+		})
 	}
 }
 

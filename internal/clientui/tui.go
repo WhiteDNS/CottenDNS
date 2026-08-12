@@ -401,13 +401,22 @@ func formatDuration(d time.Duration) string {
 
 // ShouldUse reports whether the selected mode should launch the dashboard.
 func ShouldUse(mode string) bool {
+	return shouldUse(
+		mode,
+		term.IsTerminal(os.Stdin.Fd()),
+		term.IsTerminal(os.Stdout.Fd()),
+	)
+}
+
+func shouldUse(mode string, stdinTerminal, stdoutTerminal bool) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "tui":
-		return true
 	case "plain":
 		return false
 	default:
-		return term.IsTerminal(os.Stdout.Fd()) && term.IsTerminal(os.Stdin.Fd())
+		// Bubble Tea requires a real input and output terminal. This guard also
+		// applies to an explicit "tui" request so GUI wrappers using pipes can
+		// never be trapped in an unusable dashboard.
+		return stdinTerminal && stdoutTerminal
 	}
 }
 

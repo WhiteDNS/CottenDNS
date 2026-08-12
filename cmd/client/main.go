@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"cottendns-go/internal/client"
-	"cottendns-go/internal/clientui"
 	"cottendns-go/internal/config"
 	"cottendns-go/internal/runtimepath"
 	"cottendns-go/internal/version"
@@ -39,6 +38,12 @@ func promptStartupMode(preConfig config.ClientStartupPreConfig) bool {
 		return false
 	case "logs":
 		return true
+	}
+	if !canPromptStartup() {
+		// GUI wrappers and mobile launchers normally attach pipes instead of a
+		// terminal. Never make a supervised engine wait for console input just
+		// because an older vendored config omitted STARTUP_MODE.
+		return false
 	}
 
 	// Interactive mode: ask the user with a 10-second timeout.
@@ -150,13 +155,7 @@ func main() {
 		}
 	}
 
-	var runErr error
-	if clientui.ShouldUse(app.TerminalUIMode()) {
-		runErr = clientui.Run(sigCtx, app, intro)
-	} else {
-		intro()
-		runErr = app.Run(sigCtx)
-	}
+	runErr := runClient(sigCtx, app, intro)
 	if runErr != nil {
 		if log != nil {
 			log.Errorf("Runtime error: %v", runErr)
