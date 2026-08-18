@@ -32,6 +32,14 @@ type ServerConfig struct {
 	UDPHost      string `toml:"UDP_HOST"`
 	UDPPort      int    `toml:"UDP_PORT"`
 	UDPReaders   int    `toml:"UDP_READERS"`
+	// UDPIPv6Enabled adds a dedicated udp6 tunnel listener on UDPIPv6Host at the
+	// same UDP port, alongside the IPv4 listener, so IPv4 and IPv6 clients are
+	// served together. Like the TCP side it never relies on platform dual-stack
+	// behavior of a socket bound to [::]. It is opened dynamically: only when the
+	// host actually has a usable IPv6 address (netutil.HasIPv6), so an IPv4-only
+	// host neither fails nor wastes a socket. Default true.
+	UDPIPv6Enabled bool   `toml:"UDP_IPV6_ENABLED"`
+	UDPIPv6Host    string `toml:"UDP_IPV6_HOST"`
 	// TCPListenerEnabled also serves DNS-over-TCP on the same host:port, so
 	// clients on networks that filter or truncate UDP/53 can fall back to TCP/53.
 	// Default true. TCPMaxConns caps concurrent TCP connections (0 = default).
@@ -264,6 +272,8 @@ func defaultServerConfig() ServerConfig {
 		ProtocolType:                      "SOCKS5",
 		UDPHost:                           "0.0.0.0",
 		UDPPort:                           53,
+		UDPIPv6Enabled:                    true,
+		UDPIPv6Host:                       "::",
 		TCPListenerEnabled:                true,
 		TCPIPv6Enabled:                    true,
 		TCPIPv6Host:                       "::",
@@ -434,6 +444,14 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 
 	if cfg.UDPHost == "" {
 		cfg.UDPHost = "0.0.0.0"
+	}
+	if strings.TrimSpace(cfg.UDPIPv6Host) == "" {
+		cfg.UDPIPv6Host = "::"
+	}
+	if cfg.UDPIPv6Enabled {
+		if ip := net.ParseIP(strings.TrimSpace(cfg.UDPIPv6Host)); ip == nil || ip.To4() != nil {
+			return cfg, fmt.Errorf("UDP_IPV6_HOST must be an IPv6 address: %q", cfg.UDPIPv6Host)
+		}
 	}
 	if strings.TrimSpace(cfg.TCPIPv6Host) == "" {
 		cfg.TCPIPv6Host = "::"

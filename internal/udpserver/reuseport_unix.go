@@ -65,10 +65,10 @@ func listenTCPReusePort(network, address string) (net.Listener, error) {
 	return lc.Listen(context.Background(), network, address)
 }
 
-func listenUDPReusePort(addr *net.UDPAddr) (*net.UDPConn, error) {
+func listenUDPReusePort(network string, addr *net.UDPAddr) (*net.UDPConn, error) {
 	lc := net.ListenConfig{Control: reusePortControl}
 
-	pc, err := lc.ListenPacket(context.Background(), "udp", addr.String())
+	pc, err := lc.ListenPacket(context.Background(), network, addr.String())
 	if err != nil {
 		return nil, err
 	}
