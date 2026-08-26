@@ -55,10 +55,11 @@ func fragmentPayload(payload []byte, mtu int) [][]byte {
 }
 
 func formatResolverEndpoint(resolver string, port int) string {
-	if strings.IndexByte(resolver, ':') >= 0 && !strings.HasPrefix(resolver, "[") {
-		return fmt.Sprintf("[%s]:%d", resolver, port)
+	host := strings.TrimSpace(resolver)
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
 	}
-	return fmt.Sprintf("%s:%d", resolver, port)
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 func makeConnectionKey(resolver string, port int, domain string) string {
@@ -574,8 +575,9 @@ func (c *Client) BuildConnectionMap() error {
 		filtered := make([]config.ResolverAddress, 0, len(resolvers))
 		wantIPv6 := c.cfg.ResolverIPMode == "ipv6"
 		for _, resolver := range resolvers {
-			ip := net.ParseIP(resolver.IP)
-			if ip != nil && (ip.To4() == nil) == wantIPv6 {
+			isIPv6 := resolverAddressIsIPv6(resolver.IP)
+			isIPv4 := net.ParseIP(resolver.IP) != nil && !isIPv6
+			if (wantIPv6 && isIPv6) || (!wantIPv6 && isIPv4) {
 				filtered = append(filtered, resolver)
 			}
 		}

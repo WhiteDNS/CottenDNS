@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -449,7 +450,7 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 		cfg.UDPIPv6Host = "::"
 	}
 	if cfg.UDPIPv6Enabled {
-		if ip := net.ParseIP(strings.TrimSpace(cfg.UDPIPv6Host)); ip == nil || ip.To4() != nil {
+		if ip, err := netip.ParseAddr(strings.TrimSpace(cfg.UDPIPv6Host)); err != nil || !ip.Unmap().Is6() {
 			return cfg, fmt.Errorf("UDP_IPV6_HOST must be an IPv6 address: %q", cfg.UDPIPv6Host)
 		}
 	}
@@ -457,7 +458,7 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 		cfg.TCPIPv6Host = "::"
 	}
 	if cfg.TCPIPv6Enabled {
-		if ip := net.ParseIP(strings.TrimSpace(cfg.TCPIPv6Host)); ip == nil || ip.To4() != nil {
+		if ip, err := netip.ParseAddr(strings.TrimSpace(cfg.TCPIPv6Host)); err != nil || !ip.Unmap().Is6() {
 			return cfg, fmt.Errorf("TCP_IPV6_HOST must be an IPv6 address: %q", cfg.TCPIPv6Host)
 		}
 	}

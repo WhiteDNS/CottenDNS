@@ -66,6 +66,13 @@ func TestServerTCPIPv6DefaultsAndValidation(t *testing.T) {
 	if _, err := finalizeServerConfig(invalid); err != nil {
 		t.Fatalf("disabled TCP IPv6 should ignore host: %v", err)
 	}
+
+	scoped := defaultServerConfig()
+	scoped.UDPIPv6Host = "fe80::1%eth0"
+	scoped.TCPIPv6Host = "fe80::1%eth0"
+	if _, err := finalizeServerConfig(scoped); err != nil {
+		t.Fatalf("scoped IPv6 listener addresses should be accepted: %v", err)
+	}
 }
 
 func TestLoadServerConfigWithOverridesAppliesFlagPrecedence(t *testing.T) {

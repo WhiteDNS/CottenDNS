@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,8 +91,8 @@ func (s *Server) listenTCP53(host string, port int) (net.Listener, error) {
 	sockets := udpSocketCount(s.cfg.UDPReaders)
 	trimmed := strings.TrimSpace(host)
 	primaryNetwork := "tcp"
-	if ip := net.ParseIP(trimmed); ip != nil {
-		if ip.To4() != nil {
+	if ip, parseErr := netip.ParseAddr(trimmed); parseErr == nil {
+		if ip.Unmap().Is4() {
 			primaryNetwork = "tcp4"
 		} else {
 			primaryNetwork = "tcp6"

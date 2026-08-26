@@ -8,6 +8,33 @@ import (
 	"cottendns-go/internal/config"
 )
 
+func TestScopedIPv6ResolverFamily(t *testing.T) {
+	const resolver = "fe80::1%eth0"
+	if !resolverAddressIsIPv6(resolver) {
+		t.Fatalf("scoped resolver %q was not classified as IPv6", resolver)
+	}
+	if !resolverAddressIsIPv6("[" + resolver + "]") {
+		t.Fatalf("bracketed scoped resolver %q was not classified as IPv6", resolver)
+	}
+	if got := formatResolverEndpoint(resolver, 53); got != "[fe80::1%eth0]:53" {
+		t.Fatalf("scoped resolver endpoint = %q", got)
+	}
+
+	c := &Client{cfg: config.ClientConfig{
+		ResolverIPMode: "ipv6",
+		Domains:        []string{"t.example"},
+		Resolvers:      []config.ResolverAddress{{IP: resolver, Port: 53}},
+	}, resolverAddrCache: make(map[string]*net.UDPAddr)}
+	c.balancer = NewBalancer(0)
+	if err := c.BuildConnectionMap(); err != nil {
+		t.Fatalf("BuildConnectionMap rejected scoped IPv6 resolver: %v", err)
+	}
+	want4, want6 := c.configuredResolverFamilies()
+	if want4 || !want6 {
+		t.Fatalf("configured families = v4:%v v6:%v", want4, want6)
+	}
+}
+
 func TestBalancerAutoPrefersIPv4AndFallsBackToIPv6(t *testing.T) {
 	v4 := &Connection{Key: "v4", Resolver: "1.1.1.1", IsValid: true}
 	v6 := &Connection{Key: "v6", Resolver: "2606:4700:4700::1111", IsValid: true}

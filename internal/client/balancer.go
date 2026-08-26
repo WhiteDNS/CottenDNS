@@ -10,7 +10,6 @@
 package client
 
 import (
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -533,8 +532,7 @@ func splitResolverFamilies(connections []Connection, indices []int) (v4, v6 []in
 		if idx < 0 || idx >= len(connections) {
 			continue
 		}
-		ip := net.ParseIP(connections[idx].Resolver)
-		if ip != nil && ip.To4() == nil {
+		if resolverAddressIsIPv6(connections[idx].Resolver) {
 			v6 = append(v6, idx)
 		} else {
 			v4 = append(v4, idx)

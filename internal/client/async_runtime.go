@@ -48,10 +48,9 @@ func (p tunnelSocketPair) forAddr(addr *net.UDPAddr) *net.UDPConn {
 
 func (c *Client) configuredResolverFamilies() (want4, want6 bool) {
 	for _, resolver := range c.cfg.Resolvers {
-		ip := net.ParseIP(resolver.IP)
-		if ip != nil && ip.To4() == nil {
+		if resolverAddressIsIPv6(resolver.IP) {
 			want6 = true
-		} else if ip != nil {
+		} else if net.ParseIP(resolver.IP) != nil {
 			want4 = true
 		}
 	}

@@ -79,7 +79,7 @@ func (c *Client) StatusSnapshot() StatusSnapshot {
 		s.LocalDNSAddress = net.JoinHostPort(c.cfg.LocalDNSIP, strconv.Itoa(c.cfg.LocalDNSPort))
 	}
 	for _, resolver := range c.cfg.Resolvers {
-		if ip := net.ParseIP(resolver.IP); ip != nil && ip.To4() == nil {
+		if resolverAddressIsIPv6(resolver.IP) {
 			s.ConfiguredIPv6++
 		} else {
 			s.ConfiguredIPv4++
@@ -89,7 +89,7 @@ func (c *Client) StatusSnapshot() StatusSnapshot {
 		active := c.balancer.GetAllValidConnections()
 		s.ActiveResolvers = len(active)
 		for _, conn := range active {
-			if ip := net.ParseIP(conn.Resolver); ip != nil && ip.To4() == nil {
+			if resolverAddressIsIPv6(conn.Resolver) {
 				s.ActiveIPv6++
 			} else {
 				s.ActiveIPv4++

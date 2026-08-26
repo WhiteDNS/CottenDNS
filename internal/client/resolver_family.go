@@ -1,10 +1,24 @@
 package client
 
-import "net"
+import (
+	"net/netip"
+	"strings"
+)
+
+// resolverAddressIsIPv6 classifies resolver literals, including scoped IPv6
+// addresses such as fe80::1%eth0. net.ParseIP deliberately rejects zone
+// identifiers, even though net.ResolveUDPAddr accepts and needs them.
+func resolverAddressIsIPv6(host string) bool {
+	host = strings.TrimSpace(host)
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.Unmap().Is6()
+}
 
 func resolverIsIPv6(conn Connection) bool {
-	ip := net.ParseIP(conn.Resolver)
-	return ip != nil && ip.To4() == nil
+	return resolverAddressIsIPv6(conn.Resolver)
 }
 
 // resolverConnectionsForOperatingPoint returns the family pool that can
