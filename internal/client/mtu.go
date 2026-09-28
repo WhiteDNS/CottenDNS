@@ -1583,7 +1583,9 @@ func effectiveDownloadMTUProbeSize(downloadMTU int) int {
 		return 0
 	}
 
-	return downloadMTU + mtuDownResponseReserve
+	// A rejected lower boundary aborts binary search before any middle sizes.
+	// Keep small data MTUs testable against the server's wire-level minimum.
+	return max(VpnProto.MinMTUDownloadProbePayload, downloadMTU+mtuDownResponseReserve)
 }
 
 func computeSafeUploadMTU(uploadMTU int, cryptoOverhead int) int {
