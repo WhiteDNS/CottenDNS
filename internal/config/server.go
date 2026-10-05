@@ -203,6 +203,12 @@ type ServerConfig struct {
 	// their configured domains get blocked. Entries not in DOMAIN are ignored.
 	// Empty (default) = advertise nothing.
 	AdvertiseDomains []string `toml:"ADVERTISE_DOMAINS"`
+	// ZoneNS are the nameserver names the parent zone delegates each DOMAIN
+	// to. When set, apex NS queries get them back like from any authoritative
+	// server, instead of an empty answer a prober could notice. Names inside a
+	// DOMAIN are ignored (they would need glue this server cannot know).
+	// Empty (default) = unchanged behavior.
+	ZoneNS []string `toml:"ZONE_NS"`
 	MinVPNLabelLength                 int      `toml:"MIN_VPN_LABEL_LENGTH"`
 	SupportedUploadCompressionTypes   []int    `toml:"SUPPORTED_UPLOAD_COMPRESSION_TYPES"`
 	SupportedDownloadCompressionTypes []int    `toml:"SUPPORTED_DOWNLOAD_COMPRESSION_TYPES"`

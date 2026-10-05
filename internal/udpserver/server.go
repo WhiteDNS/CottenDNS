@@ -52,6 +52,7 @@ type Server struct {
 	ingressReplay            ingressReplayCache // authenticated requests already dispatched
 	domainMatcher            *domainMatcher.Matcher
 	advertisedDomains        []string // ADVERTISE_DOMAINS ∩ DOMAIN, see domain_rotation.go
+	zoneNS                   []string // ZONE_NS outside our zones, see server_utils.go
 	sessions                 *sessionStore
 	deferredDNSSession       *deferredSessionProcessor
 	deferredConnectSession   *deferredSessionProcessor
@@ -363,6 +364,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		codecs:                 []*security.Codec{codec}, // single-codec until SetCodecSet enables auto-detect
 		domainMatcher:          domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
 		advertisedDomains:      servedAdvertisedDomains(cfg.Domain, cfg.AdvertiseDomains),
+		zoneNS:                 outOfZoneNameservers(cfg.Domain, cfg.ZoneNS),
 		sessions:               newSessionStore(cfg.SessionOrphanQueueInitialCap, cfg.StreamQueueInitialCapacity, cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap, cfg.MaxStreamsPerSession, cfg.MaxActiveSessions),
 		deferredDNSSession:     newDeferredSessionProcessor(dnsDeferredWorkers, dnsDeferredQueue, log),
 		deferredConnectSession: newDeferredSessionProcessor(connectDeferredWorkers, connectDeferredQueue, log),
