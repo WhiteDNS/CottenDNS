@@ -32,6 +32,7 @@ var (
 	clientPort     = flag.Int("client-port", 18080, "Port for the CottenDns client listener")
 	serverPort     = flag.Int("server-port", 5300, "Port for the CottenDns server UDP listener")
 	pathController = flag.String("path-controller", "unified", "Client path controller: unified or legacy")
+	clientExtra    = flag.String("client-extra", "", `Extra TOML appended to the client config, e.g. "QUERY_RATE_LIMIT_PER_SECOND = 5"`)
 
 	// Standalone / slipstream-like flags
 	optMode         = flag.String("mode", "", "Standalone mode: 'sink', 'source', 'send', 'recv'")
@@ -354,7 +355,8 @@ func runOnce(ctx context.Context, direction string, runIndex int) (BenchResult, 
 	ARQ_MAX_CONTROL_RETRIES = 300
 	ARQ_DATA_NACK_INITIAL_DELAY_SECONDS = 0.35
 	ARQ_DATA_NACK_REPEAT_SECONDS = 0.8
-	`, *clientPort, encryptionKey, *pathController, queryTypesTOML, *downloadMTU)), 0644)
+	%s
+	`, *clientPort, encryptionKey, *pathController, queryTypesTOML, *downloadMTU, *clientExtra)), 0644)
 
 	absClientBin, _ := filepath.Abs(filepath.Join(binDir, "client.exe"))
 	clientCmd := exec.Command(absClientBin, "--config", clientCfg)
