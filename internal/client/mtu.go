@@ -1077,6 +1077,9 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn *Connection, probe
 		return false, 0, nil
 	}
 
+	if !c.queryLimiter.wait(ctx, conn.Resolver, conn.Domain) {
+		return false, 0, ctx.Err()
+	}
 	startedAt := time.Now()
 	response, err := probeTransport.exchange(query, c.mtuTestTimeout)
 	if err != nil {
@@ -1201,6 +1204,9 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn *Connection, pro
 		return false, 0, nil
 	}
 
+	if !c.queryLimiter.wait(ctx, conn.Resolver, conn.Domain) {
+		return false, 0, ctx.Err()
+	}
 	startedAt := time.Now()
 	response, err := probeTransport.exchange(query, c.mtuTestTimeout)
 	if err != nil {

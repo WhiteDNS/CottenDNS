@@ -221,6 +221,37 @@ RESOLVER_TLS_INSECURE_SKIP_VERIFY = false
 # avoids triggering resolver/IP rate-limit blocks. Default on.
 RESOLVER_RATE_LIMIT_ENABLED = true
 
+# Query rate limits — for networks that silently drop or block DNS above a
+# fixed rate. Covers EVERY query the client sends: data, pings, MTU discovery,
+# session setup, health rechecks — over UDP, TCP, DoT and DoH.
+# The firewall's counting rule is usually unknown, so each scope is separate
+# and they stack (a query waits until every enabled scope allows it):
+#   QUERY_RATE_LIMIT_PER_SECOND               total for this client
+#   QUERY_RATE_LIMIT_PER_RESOLVER_PER_SECOND  per destination resolver IP
+#   QUERY_RATE_LIMIT_PER_DOMAIN_PER_SECOND    per tunnel domain (DOMAINS)
+# 0 = scope off (default). Set a cap just under the observed limit, e.g. 5 for
+# a 6/sec limit. Queries are queued and evenly spaced, never dropped.
+# Turning on ANY scope automatically: forces all *_DUPLICATION_COUNT to 1,
+# disables ADAPTIVE_DUPLICATION and session-init racing, sets
+# MTU_BACKGROUND_PARALLELISM = 1, caps RECHECK_BATCH_SIZE at 2, and skips pings
+# while other queries are already flowing. Use only a few resolvers so MTU
+# discovery finishes quickly.
+# Limit unknown? Start with QUERY_RATE_LIMIT_PER_SECOND = 3. If it is stable,
+# try 0 there with PER_RESOLVER = 3 and several resolvers: if speed rises with
+# more resolvers, the firewall counts per destination, not per client.
+QUERY_RATE_LIMIT_PER_SECOND = 0
+QUERY_RATE_LIMIT_PER_RESOLVER_PER_SECOND = 0
+QUERY_RATE_LIMIT_PER_DOMAIN_PER_SECOND = 0
+# Queries allowed back-to-back before spacing applies. 1 = evenly spaced
+# (safest: never exceeds the rate in any counting window).
+QUERY_RATE_LIMIT_BURST = 1
+
+# Timing mask (0..1). Stretches every rate-limit gap and ping interval by a
+# random fraction up to this value, so the tunnel has no machine-like rhythm
+# (a perfectly regular query clock stands out). Only lengthens gaps, so the
+# caps above still hold; average rate drops by about JITTER/2. 0 = off.
+QUERY_TIMING_JITTER = 0
+
 # DNS-injection hardening (client-only, NO server change; zero speed cost).
 # On restrictive networks a DPI box races a forged NXDOMAIN back to you while the
 # real authoritative answer still arrives — so the resolver stays usable, but the
