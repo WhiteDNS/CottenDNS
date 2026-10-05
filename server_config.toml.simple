@@ -30,6 +30,15 @@ DOMAIN = ["v.domain.com"]
 # Example: ADVERTISE_DOMAINS = ["v2.domain.com", "t.other.net"]
 ADVERTISE_DOMAINS = []
 
+# Nameserver names your registrar/parent zone delegates DOMAIN to (the NS
+# records you created, e.g. "ns.domain.com"). When set, a query for a DOMAIN's
+# own NS records is answered with these, like any real authoritative server;
+# otherwise it gets an empty answer, which an active prober can notice.
+# Use EXACTLY the names from your delegation: resolvers may trust this answer
+# over the parent's. Names inside a DOMAIN are ignored. Empty = off.
+# Example: ZONE_NS = ["ns.domain.com"]
+ZONE_NS = []
+
 # How this server should handle new connections.
 # Allowed values:
 # "SOCKS5" = the client/program chooses the destination for each connection.

@@ -245,6 +245,11 @@ func TestTunnelEndToEndReshapedQNameTCPNonTXT(t *testing.T) {
 		"RESOLVER_TRANSPORT = \"tcp\"\nQNAME_LABEL_LENGTH = 24\n")
 }
 
+func TestTunnelEndToEndWithZoneNS(t *testing.T) {
+	// Answering apex NS queries (probe hardening) must not disturb tunnel traffic.
+	runTunnelEcho(t, 3, 3, "ZONE_NS = [\"ns.example.net\"]\n", "", "")
+}
+
 func TestTunnelEndToEndDomainRotation(t *testing.T) {
 	// The client's configured domain is "blocked": the server does not serve it.
 	// After two failed scans the client must switch to its standby domain and
