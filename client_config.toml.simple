@@ -25,19 +25,22 @@ DOMAINS = ["v.domain.com"]
 
 # DNS record types the client rotates over when building tunnel queries (A1,
 # anti-fingerprinting). Names are case-insensitive. The tunnel payload always
-# rides in the query name, so any of these work, and the server auto-accepts
-# every type; specialized A/AAAA data answers are opt-in server features:
+# rides in the query name. The server accepts every listed type, but the
+# resolver must pass its replies. A/AAAA answer delivery is enabled by default:
 #   TXT   -> TXT chunks (default, highest capacity over recursive resolvers)
 #   NULL  -> raw frame in the answer RDATA (high capacity, direct-resolver path)
 #   HTTPS / SVCB -> frame inside a service-binding SvcParam value
 #   A     -> IPv4 A records (server A_RECORD_DATA_DELIVERY, on by default)
 #   AAAA  -> denser IPv6 records (server AAAA_RECORD_DATA_DELIVERY, on by default)
 # Small carriers (CNAME, A, and the other name-based types) only carry control
-# packets and small frames; bulk data rides TXT/NULL/HTTPS/AAAA. Keep at least
-# one of TXT, NULL or HTTPS in the list for full download speed.
-#   CNAME and all other types -> CNAME target (falls back to TXT for large frames)
+# packets and small frames; bulk data rides TXT/NULL/HTTPS/SVCB. Keep at least
+# one of TXT, NULL, HTTPS or SVCB in the list for full download speed.
+#   CNAME and all other listed types -> size-limited CNAME target
+# For small-carrier-only configurations, lower MIN_DOWNLOAD_MTU (e.g. 30).
 # Unset / empty = TXT only (historical behavior). Recognized:
 #   TXT, CNAME, A, AAAA, NULL, MX, NS, PTR, SRV, SVCB, CAA, NAPTR, SOA, HTTPS
+# These are tunnel query types, not Cloudflare zone records. NS delegation
+# plus an A/AAAA nameserver address already routes them to CottenDNS.
 # Example: QUERY_TYPES = ["TXT", "CNAME", "NULL", "HTTPS"]
 QUERY_TYPES = ["TXT"]
 
