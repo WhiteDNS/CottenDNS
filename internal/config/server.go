@@ -198,6 +198,11 @@ type ServerConfig struct {
 	ForwardIP                         string   `toml:"FORWARD_IP"`
 	ForwardPort                       int      `toml:"FORWARD_PORT"`
 	Domain                            []string `toml:"DOMAIN"`
+	// AdvertiseDomains are the tunnel domains this server tells clients about
+	// (domain rotation). Clients keep them as standby and switch to them when
+	// their configured domains get blocked. Entries not in DOMAIN are ignored.
+	// Empty (default) = advertise nothing.
+	AdvertiseDomains []string `toml:"ADVERTISE_DOMAINS"`
 	MinVPNLabelLength                 int      `toml:"MIN_VPN_LABEL_LENGTH"`
 	SupportedUploadCompressionTypes   []int    `toml:"SUPPORTED_UPLOAD_COMPRESSION_TYPES"`
 	SupportedDownloadCompressionTypes []int    `toml:"SUPPORTED_DOWNLOAD_COMPRESSION_TYPES"`
