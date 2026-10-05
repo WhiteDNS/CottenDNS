@@ -250,7 +250,7 @@ QUERY_RATE_LIMIT_BURST = 1
 # random fraction up to this value, so the tunnel has no machine-like rhythm
 # (a perfectly regular query clock stands out). Only lengthens gaps, so the
 # caps above still hold; average rate drops by about JITTER/2. 0 = off.
-QUERY_TIMING_JITTER = 0
+QUERY_TIMING_JITTER = 0.0
 
 # DNS-injection hardening (client-only, NO server change; zero speed cost).
 # On restrictive networks a DPI box races a forged NXDOMAIN back to you while the
