@@ -76,12 +76,8 @@ func (s *Server) cachedDNSResponse(key string, query []byte, now time.Time) ([]b
 		delete(s.embeddedDNSCache, key)
 		return nil, false
 	}
-	age := uint32(max(now.Sub(entry.storedAt)/time.Second, 0))
-	remaining := uint32(max(entry.expiresAt.Sub(now)/time.Second, 0))
-	for _, offset := range entry.ttlFields {
-		ttl := binary.BigEndian.Uint32(response[offset : offset+4])
-		binary.BigEndian.PutUint32(response[offset:offset+4], min(ttl-min(ttl, age), remaining))
-	}
+	// The shared cache now ages DNS TTLs for standalone and embedded users.
+	// Applying the embedded age again would subtract elapsed time twice.
 	return patchEmbeddedDNSQuestion(response, query), true
 }
 
