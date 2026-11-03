@@ -56,10 +56,17 @@ func qnameLabelLen() int {
 // by the wire builder and the capacity calculations, so a name can never exceed
 // the 253-byte limit.
 func qnameLabelCount(encodedLen int) int {
+	return qnameLabelCountWithLength(encodedLen, 0)
+}
+
+func qnameLabelCountWithLength(encodedLen int, labelLen int) int {
 	if encodedLen <= 0 {
 		return 0
 	}
-	l := qnameLabelLen()
+	if labelLen < 1 || labelLen > maxDNSLabelLen {
+		labelLen = qnameLabelLen()
+	}
+	l := labelLen
 	return (encodedLen + l - 1) / l
 }
 
@@ -69,7 +76,14 @@ func qnameLabelCount(encodedLen int) int {
 // are not all uniform. The seed only affects the (decode-irrelevant) split
 // positions, never the concatenated payload.
 func shapeQNameLabelLengths(encodedLen int, seed uint64) []int {
-	count := qnameLabelCount(encodedLen)
+	return shapeQNameLabelLengthsWithMax(encodedLen, seed, 0)
+}
+
+func shapeQNameLabelLengthsWithMax(encodedLen int, seed uint64, maxLabelLen int) []int {
+	if maxLabelLen < 1 || maxLabelLen > maxDNSLabelLen {
+		maxLabelLen = qnameLabelLen()
+	}
+	count := qnameLabelCountWithLength(encodedLen, maxLabelLen)
 	if count <= 0 {
 		return nil
 	}
@@ -77,7 +91,7 @@ func shapeQNameLabelLengths(encodedLen int, seed uint64) []int {
 	// Default (max label length): legacy greedy split — fewest, longest labels.
 	// This keeps the wire bytes identical to the historical builder so the
 	// default behavior is unchanged; reshaping is opt-in via a smaller length.
-	if qnameLabelLen() >= maxDNSLabelLen {
+	if maxLabelLen >= maxDNSLabelLen {
 		lengths := make([]int, count)
 		remaining := encodedLen
 		for i := range lengths {
@@ -107,8 +121,8 @@ func shapeQNameLabelLengths(encodedLen int, seed uint64) []int {
 	s := seed | 1
 	for i := 0; i+1 < count; i += 2 {
 		s = s*6364136223846793005 + 1442695040888963407 // LCG step
-		up := min(lengths[i]-1, maxDNSLabelLen-lengths[i+1])
-		down := min(lengths[i+1]-1, maxDNSLabelLen-lengths[i])
+		up := min(lengths[i]-1, maxLabelLen-lengths[i+1])
+		down := min(lengths[i+1]-1, maxLabelLen-lengths[i])
 		span := up + down
 		if span <= 0 {
 			continue

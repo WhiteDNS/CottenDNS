@@ -645,6 +645,8 @@ preset is malformed before that point.
   *recovers* throughput under poisoning by keeping working resolvers in the pool.
 - `QUERY_TYPES` — DNS record types to rotate (TXT/CNAME/A/NULL/HTTPS/SVCB/…).
 - `MTU_PROBE_SAMPLES` (1) / `MTU_MAX_LOSS` (0.0) — loss-aware probing.
+- `MTU_TEST_MAX_QNAME_LENGTH` (0) — optional per-label maximum for startup MTU
+  probes; zero uses the regular `QNAME_LABEL_LENGTH` setting.
 - `MTU_ADAPTIVE_GROUPING` (true) / `MTU_GROUP_GAP_RATIO` (0.25) — adaptive MTU.
 - `RESOLVER_BALANCING_STRATEGY` — 1 random, 2 round-robin, 3 least-loss,
   4 lowest-latency, **5 MTU-weighted**.

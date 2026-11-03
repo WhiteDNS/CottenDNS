@@ -28,6 +28,9 @@ import (
 // the recursive resolver before the query ever reaches the server.
 type QueryShaping struct {
 	EncryptedPaddingBlockSize int
+	// QNameLabelLength overrides the process default for this query only. Zero
+	// uses the global QNAME_LABEL_LENGTH setting.
+	QNameLabelLength int
 
 	// EDNSUDPSize is the requestor's UDP payload size advertised in the OPT
 	// record. 0 omits the OPT record entirely.
@@ -211,16 +214,20 @@ func BuildTunnelQuestionPacketShaped(normalizedDomain string, domainQname []byte
 	}
 
 	requestID := queryTransactionID(shaping)
+	labelLength := shaping.QNameLabelLength
+	if labelLength < 1 || labelLength > maxDNSLabelLen {
+		labelLength = qnameLabelLen()
+	}
 
 	var labelLengths []int
 	payloadLen := len(encodedFrame)
 	if payloadLen > 0 {
-		if encodedQNameLen(payloadLen, len(normalizedDomain)) > maxDNSNameLen {
+		if encodedQNameLenWithLabelLength(payloadLen, len(normalizedDomain), labelLength) > maxDNSNameLen {
 			return nil, ErrInvalidName
 		}
 		// Shape the encoded payload into labels (lengths jittered per query).
-		// Label count comes from qnameLabelCount so it matches encodedQNameLen.
-		labelLengths = shapeQNameLabelLengths(payloadLen, uint64(requestID))
+		// Label count uses the same per-query override as capacity calculation.
+		labelLengths = shapeQNameLabelLengthsWithMax(payloadLen, uint64(requestID), labelLength)
 	}
 	labelCount := len(labelLengths)
 	qnameLen := payloadLen + labelCount + len(domainQname)
@@ -273,9 +280,19 @@ func PrepareTunnelDomainQname(domain string) (string, []byte, error) {
 }
 
 func CalculateMaxEncodedQNameChars(domain string) int {
+	return CalculateMaxEncodedQNameCharsWithLabelLength(domain, 0)
+}
+
+// CalculateMaxEncodedQNameCharsWithLabelLength returns the largest encoded
+// payload that fits in a DNS name when payload labels use labelLength. A zero
+// or invalid value uses the process default.
+func CalculateMaxEncodedQNameCharsWithLabelLength(domain string, labelLength int) int {
 	domainLen := len(strings.TrimSuffix(strings.TrimSpace(domain), "."))
 	if domainLen <= 0 {
 		return maxDNSNameLen
+	}
+	if labelLength < 1 || labelLength > maxDNSLabelLen {
+		labelLength = qnameLabelLen()
 	}
 
 	low := 0
@@ -283,7 +300,7 @@ func CalculateMaxEncodedQNameChars(domain string) int {
 	best := 0
 	for low <= high {
 		mid := (low + high) / 2
-		if encodedQNameLen(mid, domainLen) <= maxDNSNameLen {
+		if encodedQNameLenWithLabelLength(mid, domainLen, labelLength) <= maxDNSNameLen {
 			best = mid
 			low = mid + 1
 		} else {
@@ -331,13 +348,17 @@ func BuildTunnelQuestionName(domain string, encodedFrame string) (string, error)
 }
 
 func encodedQNameLen(encodedChars int, domainLen int) int {
+	return encodedQNameLenWithLabelLength(encodedChars, domainLen, 0)
+}
+
+func encodedQNameLenWithLabelLength(encodedChars int, domainLen int, labelLength int) int {
 	if encodedChars <= 0 {
 		return domainLen
 	}
 	// encodedChars data bytes + one length byte per label + the trailing dot
 	// before the base domain + the domain itself. qnameLabelCount is the shared
 	// source of truth with the wire builder, so this stays exact under reshaping.
-	return encodedChars + qnameLabelCount(encodedChars) + domainLen
+	return encodedChars + qnameLabelCountWithLength(encodedChars, labelLength) + domainLen
 }
 
 var dnsIDCounter atomic.Uint32

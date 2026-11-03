@@ -152,6 +152,10 @@ func (c *Client) buildTunnelTXTQueryRaw(domain string, options VpnProto.BuildOpt
 }
 
 func (c *Client) buildTunnelQueryRawWithType(domain string, options VpnProto.BuildOptions, qType uint16) ([]byte, error) {
+	return c.buildTunnelQueryRawWithTypeAndShaping(domain, options, qType, c.queryShaping())
+}
+
+func (c *Client) buildTunnelQueryRawWithTypeAndShaping(domain string, options VpnProto.BuildOptions, qType uint16, shaping DnsParser.QueryShaping) ([]byte, error) {
 	raw, err := VpnProto.BuildRaw(options)
 	if err != nil {
 		return nil, err
@@ -160,7 +164,11 @@ func (c *Client) buildTunnelQueryRawWithType(domain string, options VpnProto.Bui
 	if err != nil {
 		return nil, err
 	}
-	return c.buildTunnelTXTQuestionBytes(domain, encoded, qType)
+	normalized, domainQname, err := DnsParser.PrepareTunnelDomainQname(domain)
+	if err != nil {
+		return nil, err
+	}
+	return DnsParser.BuildTunnelQuestionPacketShaped(normalized, domainQname, encoded, qType, shaping)
 }
 
 func (c *Client) buildEncodedAutoWithCompressionTrace(options VpnProto.BuildOptions) ([]byte, error) {
