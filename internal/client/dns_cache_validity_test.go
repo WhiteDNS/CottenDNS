@@ -15,17 +15,17 @@ func TestCompletedDNSFailureIsDeliveredButNotCached(t *testing.T) {
 		t.Fatal(err)
 	}
 	parsed, _ := dnsParser.ParseDNSRequestLite(query)
-	response, err := dnsParser.BuildServerFailureResponse(query)
-	if err != nil {
-		t.Fatal(err)
-	}
 	c := &Client{localDNSCache: dnscache.New(128, 4*time.Hour, time.Second), sessionReady: true}
-	key := dnscache.BuildKey(parsed.FirstQuestion.Name, 1, 1)
+	key := dnscache.BuildQueryKey(query, dnscache.BuildKey(parsed.FirstQuestion.Name, 1, 1))
 	c.localDNSCache.LookupOrCreatePending(key, parsed.FirstQuestion.Name, 1, 1, time.Now())
 	var got []byte
 	c.pendingDNS.mu.Lock()
 	c.addPendingDNSLocked(key, query, func(reply []byte) { got = reply })
 	c.pendingDNS.mu.Unlock()
+	response, err := dnsParser.BuildServerFailureResponse(pendingDNSWireQuery(t, c, query))
+	if err != nil {
+		t.Fatal(err)
+	}
 	c.completePendingDNS(response, parsed.FirstQuestion)
 	if len(got) < 4 || got[3]&15 != 2 {
 		t.Fatal("waiter lost its actual upstream failure")
@@ -50,7 +50,7 @@ func TestClientDNSHotAnswerExpires(t *testing.T) {
 	binary.BigEndian.PutUint16(response[10:12], 0)
 	response = append(response, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 8, 8, 8, 8)
 	c := &Client{localDNSCache: dnscache.New(128, 4*time.Hour, time.Second), sessionReady: true}
-	key := dnscache.BuildKey(parsed.FirstQuestion.Name, 1, 1)
+	key := dnscache.BuildQueryKey(query, dnscache.BuildKey(parsed.FirstQuestion.Name, 1, 1))
 	start := time.Now().Add(-61 * time.Second)
 	c.localDNSCache.SetReady(key, parsed.FirstQuestion.Name, 1, 1, response, start)
 	for i := 0; i < 60; i++ {

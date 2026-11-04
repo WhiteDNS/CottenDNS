@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	dnsParser "cottendns-go/internal/dnsparser"
 )
 
 type Status uint8
@@ -120,6 +122,13 @@ func PatchResponseForQuery(rawResponse []byte, rawQuery []byte) []byte {
 		responseFlags := binary.BigEndian.Uint16(patched[2:4])
 		responseFlags = (responseFlags &^ 0x0110) | (queryFlags & 0x0110)
 		binary.BigEndian.PutUint16(patched[2:4], responseFlags)
+	}
+	// Coalesced/cache-hit requests can differ in QNAME case. Return the
+	// caller's question spelling without altering compression offsets.
+	r, responseErr := dnsParser.ParsePacketLite(patched)
+	q, queryErr := dnsParser.ParseDNSRequestLite(rawQuery)
+	if responseErr == nil && queryErr == nil && r.Header.QDCount == 1 && q.Header.QDCount == 1 && r.FirstQuestion == q.FirstQuestion && r.QuestionEndOffset == q.QuestionEndOffset {
+		copy(patched[12:r.QuestionEndOffset], rawQuery[12:q.QuestionEndOffset])
 	}
 	return patched
 }

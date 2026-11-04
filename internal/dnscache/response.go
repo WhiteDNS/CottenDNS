@@ -1,12 +1,40 @@
 package dnscache
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"strings"
 	"time"
 
 	dnsParser "cottendns-go/internal/dnsparser"
 )
+
+// BuildQueryKey retains all DNS request policy, including RD/CD, EDNS flags,
+// options and response size. Only the transaction ID and uncompressed QNAME
+// case are ignored, so equivalent requests can share cached/in-flight work.
+func BuildQueryKey(query []byte, base string) string {
+	canonical := append([]byte(nil), query...)
+	if len(canonical) >= 2 {
+		canonical[0], canonical[1] = 0, 0
+	}
+	if len(canonical) >= 12 && binary.BigEndian.Uint16(canonical[4:6]) == 1 {
+		for offset := 12; offset < len(canonical); {
+			n := int(canonical[offset])
+			offset++
+			if n == 0 || n > 63 || offset+n > len(canonical) {
+				break
+			}
+			for i := offset; i < offset+n; i++ {
+				if canonical[i] >= 'A' && canonical[i] <= 'Z' {
+					canonical[i] += 'a' - 'A'
+				}
+			}
+			offset += n
+		}
+	}
+	hash := sha256.Sum256(canonical)
+	return base + string(hash[:])
+}
 
 // responseLifetime validates a complete cacheable answer and records its TTL
 // fields once. OPT's TTL word contains EDNS flags and must never be aged.
