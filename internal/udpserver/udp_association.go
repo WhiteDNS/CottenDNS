@@ -223,9 +223,10 @@ func (c *udpAssociationConn) endpointFor(host string, port uint16) (*udpAssociat
 	}
 	var conn net.Conn
 	if c.monitor != nil && c.monitor.embeddedDialContext != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), udpResolveTimeout)
-		defer cancel()
-		conn, err = c.monitor.embeddedDialContext(ctx, network, addr.String())
+		// The embedded wrapper already bounds upstream setup to 15 seconds and
+		// cancels it with the account. DNS lookup's shorter budget must not cut
+		// off a slow but valid proxy handshake.
+		conn, err = c.monitor.embeddedDialContext(context.Background(), network, addr.String())
 	} else {
 		conn, err = net.DialUDP(network, nil, addr)
 	}
