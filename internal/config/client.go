@@ -172,12 +172,15 @@ type ClientConfig struct {
 	MinDownloadMTU                        int     `toml:"MIN_DOWNLOAD_MTU"`
 	MaxUploadMTU                          int     `toml:"MAX_UPLOAD_MTU"`
 	MaxDownloadMTU                        int     `toml:"MAX_DOWNLOAD_MTU"`
-	MTUTestRetriesResolvers               int     `toml:"MTU_TEST_RETRIES_RESOLVERS"`
-	MTUTestRetriesLogs                    int     `toml:"MTU_TEST_RETRIES_LOGS"`
-	MTUTestTimeoutResolvers               float64 `toml:"MTU_TEST_TIMEOUT_RESOLVERS"`
-	MTUTestTimeoutLogs                    float64 `toml:"MTU_TEST_TIMEOUT_LOGS"`
-	MTUTestParallelismResolvers           int     `toml:"MTU_TEST_PARALLELISM_RESOLVERS"`
-	MTUTestParallelismLogs                int     `toml:"MTU_TEST_PARALLELISM_LOGS"`
+	// MTUTestMaxQNameLength caps each payload label in MTU probe QNAMEs. Zero
+	// uses the regular QNAME_LABEL_LENGTH setting.
+	MTUTestMaxQNameLength       int     `toml:"MTU_TEST_MAX_QNAME_LENGTH"`
+	MTUTestRetriesResolvers     int     `toml:"MTU_TEST_RETRIES_RESOLVERS"`
+	MTUTestRetriesLogs          int     `toml:"MTU_TEST_RETRIES_LOGS"`
+	MTUTestTimeoutResolvers     float64 `toml:"MTU_TEST_TIMEOUT_RESOLVERS"`
+	MTUTestTimeoutLogs          float64 `toml:"MTU_TEST_TIMEOUT_LOGS"`
+	MTUTestParallelismResolvers int     `toml:"MTU_TEST_PARALLELISM_RESOLVERS"`
+	MTUTestParallelismLogs      int     `toml:"MTU_TEST_PARALLELISM_LOGS"`
 	// MTUBackgroundParallelism is how many resolvers the FastConnect background
 	// sweep probes at once, after the starter pool has released the session. The
 	// initial scan keeps using MTUTestParallelism so connecting stays fast; this
@@ -431,6 +434,7 @@ func defaultClientConfig() ClientConfig {
 		MinDownloadMTU:                     1000,
 		MaxUploadMTU:                       200,
 		MaxDownloadMTU:                     4000,
+		MTUTestMaxQNameLength:              0,
 		MTUTestRetriesResolvers:            3,
 		MTUTestRetriesLogs:                 5,
 		MTUTestTimeoutResolvers:            2.0,
@@ -828,6 +832,9 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 
 	if cfg.MinUploadMTU < 0 || cfg.MinDownloadMTU < 0 || cfg.MaxUploadMTU < 0 || cfg.MaxDownloadMTU < 0 {
 		return cfg, fmt.Errorf("mtu values cannot be negative")
+	}
+	if cfg.MTUTestMaxQNameLength < 0 || cfg.MTUTestMaxQNameLength > 63 {
+		return cfg, fmt.Errorf("MTU_TEST_MAX_QNAME_LENGTH must be 0 (use QNAME_LABEL_LENGTH) or 1..63")
 	}
 
 	if cfg.MaxUploadMTU > 0 && cfg.MinUploadMTU > cfg.MaxUploadMTU {

@@ -2,8 +2,11 @@ package client
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 
+	DnsParser "cottendns-go/internal/dnsparser"
+	Enums "cottendns-go/internal/enums"
 	"cottendns-go/internal/security"
 )
 
@@ -54,5 +57,45 @@ func TestBuildMTUProbePayloadWritesModeAndProbeCodeWithoutFillingTail(t *testing
 		if value != 0 {
 			t.Fatalf("expected zero-filled tail at offset %d, got=%d", i+(1+mtuProbeCodeLength), value)
 		}
+	}
+}
+
+func TestMTUProbeQNameLimitCapsLabelLengthAndCapacity(t *testing.T) {
+	c := createTestClient(t)
+	const domain = "example.com"
+	c.cfg.MTUTestMaxQNameLength = 30
+	limited := c.maxUploadMTUPayload(domain)
+	if limited <= 0 {
+		t.Fatalf("expected some upload capacity with 30-character labels, got %d", limited)
+	}
+	if !c.canBuildUploadPayload(domain, limited) {
+		t.Fatalf("computed capacity %d does not fit under DNS name limit", limited)
+	}
+	if c.canBuildUploadPayload(domain, limited+1) {
+		t.Fatalf("payload beyond computed capacity %d unexpectedly fits", limited)
+	}
+	payload, _, _, err := c.buildMTUProbePayload(limited)
+	if err != nil {
+		t.Fatalf("buildMTUProbePayload returned error: %v", err)
+	}
+	query, err := c.buildMTUProbeQuery(domain, Enums.PACKET_MTU_UP_REQ, payload)
+	if err != nil {
+		t.Fatalf("buildMTUProbeQuery returned error: %v", err)
+	}
+	parsed, err := DnsParser.ParsePacketLite(query)
+	if err != nil || !parsed.HasQuestion {
+		t.Fatalf("ParsePacketLite failed: parsed=%+v err=%v", parsed, err)
+	}
+	name := strings.TrimSuffix(parsed.FirstQuestion.Name, ".")
+	payloadName := strings.TrimSuffix(name, "."+domain)
+	for _, label := range strings.Split(payloadName, ".") {
+		if len(label) > 30 {
+			t.Fatalf("MTU QNAME label length %d exceeds configured limit 30", len(label))
+		}
+	}
+
+	c.cfg.MTUTestMaxQNameLength = 0
+	if !c.canBuildUploadPayload(domain, limited+1) {
+		t.Fatal("unset per-probe label limit should preserve the existing capacity behavior")
 	}
 }

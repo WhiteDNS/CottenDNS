@@ -1333,7 +1333,9 @@ func (c *Client) buildMTUProbeQuery(domain string, packetType uint8, payload []b
 	if qType == 0 {
 		qType = c.mtuProbeQueryTypes(packetType == Enums.PACKET_MTU_DOWN_REQ)[0]
 	}
-	return c.buildTunnelQueryRawWithType(domain, VpnProto.BuildOptions{
+	shaping := c.queryShaping()
+	shaping.QNameLabelLength = c.cfg.MTUTestMaxQNameLength
+	return c.buildTunnelQueryRawWithTypeAndShaping(domain, VpnProto.BuildOptions{
 		LegacySessionID: c.cfg.LegacySessionID,
 		SessionID:       255,
 		PacketType:      packetType,
@@ -1342,11 +1344,11 @@ func (c *Client) buildMTUProbeQuery(domain string, packetType uint8, payload []b
 		FragmentID:      0,
 		TotalFragments:  1,
 		Payload:         payload,
-	}, qType)
+	}, qType, shaping)
 }
 
 func (c *Client) maxUploadMTUPayload(domain string) int {
-	maxChars := DnsParser.CalculateMaxEncodedQNameChars(domain)
+	maxChars := DnsParser.CalculateMaxEncodedQNameCharsWithLabelLength(domain, c.cfg.MTUTestMaxQNameLength)
 	if maxChars <= 0 {
 		return 0
 	}
@@ -1394,8 +1396,8 @@ func (c *Client) canBuildUploadPayload(domain string, payloadLen int) bool {
 		return false
 	}
 
-	_, err = DnsParser.BuildTunnelQuestionName(domain, encoded)
-	return err == nil
+	maxChars := DnsParser.CalculateMaxEncodedQNameCharsWithLabelLength(domain, c.cfg.MTUTestMaxQNameLength)
+	return len(encoded) <= maxChars
 }
 
 func (c *Client) buildMTUProbePayload(length int) ([]byte, uint32, bool, error) {
